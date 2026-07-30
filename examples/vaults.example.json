@@ -1,0 +1,20 @@
+{
+  "vaults": {
+    "personal": {
+      "path": "C:\\Users\\USERNAME\\Documents\\Obsidian\\Personal",
+      "readOnly": false,
+      "dailyNotes": {
+        "directory": "Daily",
+        "dateFormat": "YYYY-MM-DD"
+      }
+    },
+    "reference": {
+      "path": "C:\\Users\\USERNAME\\Documents\\Obsidian\\Reference",
+      "readOnly": true,
+      "dailyNotes": {
+        "directory": "Daily",
+        "dateFormat": "YYYY-MM-DD"
+      }
+    }
+  }
+}
