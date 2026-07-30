@@ -102,6 +102,41 @@ describe('filesystem service', () => {
     );
   });
 
+  it('refuses to move a directory that only has a Markdown-looking name to trash', async () => {
+    const { root, service } = await setup();
+    await mkdir(path.join(root, 'not-a-note.md'));
+
+    await expect(service.deleteNote('test', 'not-a-note.md')).rejects.toThrow(
+      'regular Markdown file',
+    );
+    expect(
+      (await service.listDirectory('test')).map((entry) => entry.path),
+    ).toContain('not-a-note.md');
+  });
+
+  it('allows only one concurrent update for the same expected content hash', async () => {
+    const { service } = await setup();
+    const created = await service.createNote('test', 'concurrent.md', 'base');
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 12 }, (_, index) =>
+        service.updateNote(
+          'test',
+          'concurrent.md',
+          `update-${index}`,
+          created.contentHash,
+        ),
+      ),
+    );
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(11);
+  });
+
   it('enforces read-only vaults for every mutation', async () => {
     const { service } = await setup(true);
     await expect(

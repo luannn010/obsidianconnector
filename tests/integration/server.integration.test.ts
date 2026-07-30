@@ -35,7 +35,8 @@ describe('MCP server integration', () => {
       client.connect(clientTransport),
     ]);
 
-    const toolNames = (await client.listTools()).tools.map((tool) => tool.name);
+    const listedTools = (await client.listTools()).tools;
+    const toolNames = listedTools.map((tool) => tool.name);
     expect(toolNames).toEqual(
       expect.arrayContaining([
         'list_vaults',
@@ -60,6 +61,18 @@ describe('MCP server integration', () => {
         'append_daily_note',
       ]),
     );
+    expect(
+      listedTools.find((tool) => tool.name === 'read_note')?.annotations,
+    ).toMatchObject({
+      readOnlyHint: true,
+      openWorldHint: false,
+    });
+    expect(
+      listedTools.find((tool) => tool.name === 'delete_note')?.annotations,
+    ).toMatchObject({
+      destructiveHint: true,
+      openWorldHint: false,
+    });
 
     const vaults = await client.callTool({
       name: 'list_vaults',
@@ -84,6 +97,28 @@ describe('MCP server integration', () => {
       arguments: { vault: 'notes', path: '../secret.md' },
     });
     expect(invalid.isError).toBe(true);
+    const absolute = await client.callTool({
+      name: 'read_note',
+      arguments: { vault: 'notes', path: path.join(root, 'one.md') },
+    });
+    expect(absolute.isError).toBe(true);
+    const hidden = await client.callTool({
+      name: 'list_directory',
+      arguments: { vault: 'notes', directory: '.obsidian' },
+    });
+    expect(hidden.isError).toBe(true);
+    const missing = await client.callTool({
+      name: 'list_directory',
+      arguments: { vault: 'notes', directory: 'missing' },
+    });
+    expect(missing.isError).toBe(true);
+    expect(JSON.stringify(missing)).not.toContain(root);
+    await registry.register('readonly', root, true);
+    const readOnlyWrite = await client.callTool({
+      name: 'create_note',
+      arguments: { vault: 'readonly', path: 'blocked.md', content: 'blocked' },
+    });
+    expect(readOnlyWrite.isError).toBe(true);
     await client.close();
     await server.close();
   });

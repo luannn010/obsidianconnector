@@ -54,7 +54,7 @@ async function canonicalDirectory(
   }
   const info = await stat(resolved).catch(() => undefined);
   if (!info?.isDirectory()) {
-    throw new Error(`Vault directory does not exist: ${resolved}`);
+    throw new Error('Vault directory does not exist');
   }
   return realpath(resolved);
 }

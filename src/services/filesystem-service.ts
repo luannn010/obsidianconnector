@@ -187,15 +187,17 @@ export class FilesystemService {
     const vault = this.vault(vaultName);
     this.assertWritable(vault);
     const absolute = await this.notePath(vault, relativePath);
-    const current = await readFile(absolute, 'utf8');
-    if (expectedHash && hashContent(current) !== expectedHash)
-      throw new Error('Note content hash does not match expected hash');
-    await this.atomicWrite(absolute, content);
-    return {
-      vault: vault.name,
-      path: toRelative(vault.path, absolute),
-      contentHash: hashContent(content),
-    };
+    return this.withNoteLock(absolute, async () => {
+      const current = await readFile(absolute, 'utf8');
+      if (expectedHash && hashContent(current) !== expectedHash)
+        throw new Error('Note content hash does not match expected hash');
+      await this.atomicWrite(absolute, content);
+      return {
+        vault: vault.name,
+        path: toRelative(vault.path, absolute),
+        contentHash: hashContent(content),
+      };
+    });
   }
 
   async appendNote(
@@ -244,6 +246,9 @@ export class FilesystemService {
     const vault = this.vault(vaultName);
     this.assertWritable(vault);
     const source = await this.notePath(vault, relativePath);
+    const sourceInfo = await stat(source);
+    if (!sourceInfo.isFile())
+      throw new Error('Only regular Markdown files can be deleted');
     const trashRoot = path.join(vault.path, '.trash');
     await mkdir(trashRoot, { recursive: true });
     const base = path.basename(relativePath);
@@ -283,14 +288,36 @@ export class FilesystemService {
     await writeFile(temporary, content, 'utf8');
     try {
       await rename(temporary, absolute);
-    } catch (error) {
-      if (
-        (error as NodeJS.ErrnoException).code !== 'EEXIST' &&
-        (error as NodeJS.ErrnoException).code !== 'EPERM'
-      )
-        throw error;
-      await rm(absolute, { force: true });
-      await rename(temporary, absolute);
+    } catch {
+      await rm(temporary, { force: true });
+      throw new Error('Atomic replacement was unavailable');
+    }
+  }
+
+  private async withNoteLock<T>(
+    absolute: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const lockPath = path.join(
+      path.dirname(absolute),
+      `.${path.basename(absolute)}.mcp-lock`,
+    );
+    const deadline = Date.now() + 5000;
+    while (true) {
+      try {
+        await mkdir(lockPath);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (Date.now() >= deadline)
+          throw new Error('Concurrent update lock was unavailable');
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    try {
+      return await operation();
+    } finally {
+      await rm(lockPath, { recursive: true, force: true });
     }
   }
 }

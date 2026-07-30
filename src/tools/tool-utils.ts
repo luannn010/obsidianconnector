@@ -1,4 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { SecurityError } from '../security/path-security.js';
 
 export interface ToolContext {
   registry: import('../config/registry.js').VaultRegistry;
@@ -29,9 +30,40 @@ export function toolSuccess<T extends object>(
 }
 
 export function toolFailure(error: unknown): CallToolResult {
-  const message =
-    error instanceof Error ? error.message : 'Tool operation failed';
+  const message = safeErrorMessage(error);
   return { isError: true, content: [{ type: 'text', text: message }] };
+}
+
+function safeErrorMessage(error: unknown): string {
+  if (error instanceof SecurityError) return error.message;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === 'ENOENT' || code === 'ENOTDIR')
+    return 'Requested path does not exist';
+  if (code === 'EACCES' || code === 'EPERM') return 'Access denied';
+  if (code === 'EEXIST') return 'Destination already exists';
+  if (code === 'EISDIR') return 'Requested path is not a file';
+  if (code === 'ENOSPC') return 'Insufficient storage';
+  const message = error instanceof Error ? error.message : '';
+  if (message.startsWith('Vault is read-only')) return 'Vault is read-only';
+  if (message.startsWith('Vault is not registered'))
+    return 'Vault is not registered';
+  if (message.startsWith('Vault is already registered'))
+    return 'Vault is already registered';
+  if (message.startsWith('Vault name')) return 'Invalid vault name';
+  if (message.startsWith('Note already exists')) return 'Note already exists';
+  if (message.startsWith('Destination already exists'))
+    return 'Destination already exists';
+  if (message.includes('content hash'))
+    return 'Note content hash does not match expected hash';
+  if (message.startsWith('Vault directory does not exist'))
+    return 'Vault directory does not exist';
+  if (message.startsWith('Atomic replacement'))
+    return 'Atomic write could not be completed';
+  if (message.startsWith('Only regular Markdown files'))
+    return 'Only regular Markdown files can be deleted';
+  if (message.startsWith('Concurrent update lock'))
+    return 'Concurrent update lock was unavailable';
+  return 'Tool operation failed';
 }
 
 export async function runTool<T extends object>(
