@@ -59,6 +59,8 @@ describe('MCP server integration', () => {
         'list_tags',
         'list_backlinks',
         'append_daily_note',
+        'get_project_context',
+        'get_project_activity',
       ]),
     );
     expect(
@@ -73,6 +75,13 @@ describe('MCP server integration', () => {
       destructiveHint: true,
       openWorldHint: false,
     });
+    const createVaultTool = listedTools.find(
+      (tool) => tool.name === 'create_vault',
+    );
+    expect(createVaultTool?.inputSchema).toMatchObject({
+      properties: expect.objectContaining({ name: expect.any(Object) }),
+    });
+    expect(createVaultTool?.inputSchema.properties).not.toHaveProperty('path');
 
     const vaults = await client.callTool({
       name: 'list_vaults',
@@ -92,6 +101,17 @@ describe('MCP server integration', () => {
       arguments: { vault: 'notes', path: 'one.md' },
     });
     expect(JSON.stringify(backlinks)).toContain('two.md');
+    const context = await client.callTool({
+      name: 'get_project_context',
+      arguments: { vault: 'notes' },
+    });
+    expect(context.isError).not.toBe(true);
+    expect(JSON.stringify(context)).toContain('12 project note(s) inspected');
+    const activity = await client.callTool({
+      name: 'get_project_activity',
+      arguments: { vault: 'notes' },
+    });
+    expect(activity.isError).not.toBe(true);
     const invalid = await client.callTool({
       name: 'read_note',
       arguments: { vault: 'notes', path: '../secret.md' },

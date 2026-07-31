@@ -9,7 +9,7 @@ Build a Windows-first, local-only TypeScript MCP server that lets Codex and Chat
 - Windows is the first documented and tested platform; path handling uses Node's cross-platform APIs so WSL/Linux setup can be documented and supported where practical.
 - Multiple vaults are supported. The model can call `list_vaults` and select a registered vault by name; it cannot supply arbitrary filesystem roots.
 - The initial server manages Markdown notes and directories only. Attachments, semantic search, embeddings, Git synchronization, cloud synchronization, and Obsidian UI automation are out of scope.
-- The actual user vault path is not hard-coded into the project. It is supplied by local configuration or the `register_vault`/`create_vault` workflow.
+- New vaults use the configured Windows parent `G:\\My Drive\\.obsidian` and the vault name as their child directory. Existing vaults can still be registered from an explicit path.
 
 ## Architecture
 
@@ -46,7 +46,7 @@ The default configuration file is `config/vaults.json`; `OBSIDIAN_MCP_CONFIG` ov
 }
 ```
 
-The registry validates unique names, existing/canonicalizable roots, and daily-note settings. `list_vaults` returns names, paths, read-only state, and daily-note configuration; it does not expose unrelated environment data. `register_vault` adds an existing root, `unregister_vault` removes only its registration, and `create_vault` creates a new directory under an explicitly supplied path before registering it. Registry writes are atomic.
+The registry validates unique names, existing/canonicalizable roots, and daily-note settings. `list_vaults` returns names, paths, read-only state, and daily-note configuration; it does not expose unrelated environment data. `register_vault` adds an existing root, `unregister_vault` removes only its registration, and `create_vault` creates a new child directory under `G:\\My Drive\\.obsidian` before registering it. Registry writes are atomic.
 
 ## Security boundary
 

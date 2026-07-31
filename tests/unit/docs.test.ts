@@ -35,6 +35,8 @@ describe('README documentation', () => {
       'list_tags',
       'list_backlinks',
       'append_daily_note',
+      'get_project_context',
+      'get_project_activity',
     ]) {
       expect(readme).toContain(phrase);
     }

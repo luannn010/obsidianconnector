@@ -7,6 +7,7 @@ export interface ToolContext {
   search: import('../services/search-service.js').SearchService;
   frontmatter: import('../services/frontmatter-service.js').FrontmatterService;
   dailyNotes: import('../services/daily-note-service.js').DailyNoteService;
+  project: import('../services/project-context-service.js').ProjectContextService;
 }
 
 export const closedWorldAnnotations = { openWorldHint: false } as const;

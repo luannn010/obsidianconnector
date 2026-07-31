@@ -6,6 +6,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -20,6 +21,45 @@ export interface RegisteredVault extends VaultConfig {
 
 export interface ConfigPathOptions {
   cwd?: string;
+}
+
+export interface VaultRegistryOptions {
+  vaultRoot?: string;
+}
+
+export const DEFAULT_VAULT_ROOT = 'G:\\My Drive\\.obsidian';
+
+export function loadDotEnv(
+  envPath = path.resolve(process.cwd(), '.env'),
+): void {
+  let content: string;
+  try {
+    content = readFileSync(envPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  for (const line of content.split(/\r?\n/u)) {
+    const match = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/u);
+    if (!match?.[1] || process.env[match[1]] !== undefined) continue;
+    const value = match[2] ?? '';
+    process.env[match[1]] =
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+        ? value.slice(1, -1)
+        : value;
+  }
+}
+
+function isWithinRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === '' ||
+    (!path.isAbsolute(relative) &&
+      !relative.startsWith(`..${path.sep}`) &&
+      relative !== '..')
+  );
 }
 
 export function getConfigPath(options: ConfigPathOptions = {}): string {
@@ -63,9 +103,13 @@ export class VaultRegistry {
   private constructor(
     private readonly configPath: string,
     private readonly vaults: Map<string, RegisteredVault>,
+    private readonly vaultRoot: string,
   ) {}
 
-  static async load(configPath = getConfigPath()): Promise<VaultRegistry> {
+  static async load(
+    configPath = getConfigPath(),
+    options: VaultRegistryOptions = {},
+  ): Promise<VaultRegistry> {
     const resolvedConfigPath = path.resolve(configPath);
     let parsed: ReturnType<typeof VaultsFileSchema.parse>;
     try {
@@ -82,23 +126,38 @@ export class VaultRegistry {
       parsed = { vaults: {} };
     }
 
+    const vaultRoot = path.resolve(
+      options.vaultRoot ??
+        process.env.OBSIDIAN_VAULT_ROOT ??
+        DEFAULT_VAULT_ROOT,
+    );
     const entries = new Map<string, RegisteredVault>();
     for (const [name, config] of Object.entries(parsed.vaults)) {
       const normalizedName = validateName(name);
+      const configuredPath = path.resolve(config.path);
+      if (!isWithinRoot(vaultRoot, configuredPath)) {
+        continue;
+      }
+      const canonicalPath = await canonicalDirectory(configuredPath);
+      if (!isWithinRoot(vaultRoot, canonicalPath)) {
+        continue;
+      }
       entries.set(normalizedName, {
         name: normalizedName,
         ...config,
-        path: await canonicalDirectory(config.path),
+        path: canonicalPath,
       });
     }
-    return new VaultRegistry(resolvedConfigPath, entries);
+    return new VaultRegistry(resolvedConfigPath, entries, vaultRoot);
   }
 
   list(): RegisteredVault[] {
-    return [...this.vaults.values()].map((vault) => ({
-      ...vault,
-      dailyNotes: { ...vault.dailyNotes },
-    }));
+    return [...this.vaults.values()]
+      .filter((vault) => isWithinRoot(this.vaultRoot, vault.path))
+      .map((vault) => ({
+        ...vault,
+        dailyNotes: { ...vault.dailyNotes },
+      }));
   }
 
   get(name: string): RegisteredVault {
@@ -135,12 +194,13 @@ export class VaultRegistry {
 
   async create(
     name: string,
-    directory: string,
     readOnly = false,
     dailyNotes?: Partial<DailyNotesConfig>,
   ): Promise<RegisteredVault> {
-    await mkdir(path.resolve(directory), { recursive: true });
-    return this.register(name, directory, readOnly, dailyNotes);
+    const normalizedName = validateName(name);
+    const directory = path.join(this.vaultRoot, normalizedName);
+    await mkdir(directory, { recursive: true });
+    return this.register(normalizedName, directory, readOnly, dailyNotes);
   }
 
   async unregister(name: string): Promise<void> {

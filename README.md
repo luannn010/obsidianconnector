@@ -33,7 +33,7 @@ npm test
 npm run build
 ```
 
-The configuration path defaults to `config/vaults.json`. Set `$env:OBSIDIAN_MCP_CONFIG` to use another local configuration file. Register only vaults you intend to expose.
+The configuration path defaults to `config/vaults.json`. The local `.env` sets `OBSIDIAN_VAULT_ROOT=G:\\My Drive\\.obsidian`; only registered vaults beneath that directory are returned by `list_vaults`, and new vaults are created there. Set `$env:OBSIDIAN_MCP_CONFIG` or `$env:OBSIDIAN_VAULT_ROOT` to override these values for a local run. Use `register_vault` for an existing vault elsewhere, but it will remain hidden from `list_vaults` unless it is under the configured root.
 
 ## WSL/Linux setup
 
@@ -61,12 +61,6 @@ Build the server, then register the generated JavaScript entry point:
 codex mcp add obsidian-local -- node ABSOLUTE_PATH_TO_PROJECT/dist/index.js
 ```
 
-For this checkout, the command after building is:
-
-```text
-codex mcp add obsidian-local -- node C:\Users\luann\Documents\Obisidian COnnector\dist\index.js
-```
-
 If the path contains spaces, quote the executable argument as required by your shell or Codex CLI version.
 
 ## Codex IDE
@@ -83,7 +77,7 @@ Start with: “List my registered Obsidian vaults.” Then choose a returned vau
 
 - `list_vaults`: “List every registered vault and show which are read-only.”
 - `get_vault`: “Show the configuration for the `personal` vault.”
-- `create_vault`: “Create and register a writable vault named `scratch` at this absolute directory.”
+- `create_vault`: “Create and register a writable vault named `scratch` under the configured `G:\\My Drive\\.obsidian` parent directory.”
 - `register_vault`: “Register this existing vault as `work` in read-only mode.”
 - `unregister_vault`: “Unregister the `scratch` vault without deleting its files.”
 - `list_directory`: “List the Markdown notes and safe child directories in `personal/Projects`.”
@@ -101,6 +95,8 @@ Start with: “List my registered Obsidian vaults.” Then choose a returned vau
 - `list_tags`: “List tags used under `personal/Projects`.”
 - `list_backlinks`: “List notes linking to `personal/Projects/plan.md` with Obsidian wiki links.”
 - `append_daily_note`: “Append this entry to today's configured daily note in `personal`.”
+- `get_project_context`: “Read the canonical project notes from `personal` with bounded content and report missing notes.”
+- `get_project_activity`: “Extract current tasks, decisions, risks, changelog entries, and recent daily notes from `personal`.”
 
 ## Write safety
 
@@ -131,7 +127,7 @@ npm run lint
 npm run typecheck
 npm test
 npm run build
-npx @modelcontextprotocol/inspector node C:\Users\luann\Documents\Obisidian COnnector\dist\index.js
+npx @modelcontextprotocol/inspector node ABSOLUTE_PATH_TO_PROJECT/dist/index.js
 ```
 
 Use temporary test-vault configuration when inspecting write tools. Confirm the tool list, schemas, valid calls, validation errors, traversal rejection, symlink rejection, and stdout/stderr behavior.
@@ -139,6 +135,7 @@ Use temporary test-vault configuration when inspecting write tools. Confirm the 
 ## Troubleshooting
 
 - **No registered vaults:** create `config/vaults.json`, set `OBSIDIAN_MCP_CONFIG`, or call `register_vault` with an existing directory.
+- **New vault location:** `create_vault` always creates `<vault name>` under `G:\\My Drive\\.obsidian`; it does not accept an arbitrary path.
 - **Vault directory does not exist:** check spelling and Windows escaping in JSON; `register_vault` does not create missing roots.
 - **Access rejected:** use a registered vault name and a vault-relative `.md` path; do not use absolute paths or `..`.
 - **Read-only error:** register the vault with `readOnly: false` only when mutations are intended.
