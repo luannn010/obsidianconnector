@@ -1,0 +1,21 @@
+services:
+  retrieval-model:
+    build: .
+    network_mode: host
+    volumes:
+      - retrieval-model-cache:/tmp/model-cache
+    environment:
+      HF_HOME: /tmp/model-cache
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+volumes:
+  retrieval-model-cache:

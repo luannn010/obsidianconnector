@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { SecurityError } from '../security/path-security.js';
+import { KnowledgeError } from '../knowledge/errors.js';
 
 export interface ToolContext {
   registry: import('../config/registry.js').VaultRegistry;
@@ -31,6 +32,20 @@ export function toolSuccess<T extends object>(
 }
 
 export function toolFailure(error: unknown): CallToolResult {
+  if (error instanceof KnowledgeError) {
+    return {
+      isError: true,
+      content: [{ type: 'text', text: error.message }],
+      structuredContent: {
+        error: {
+          code: error.code,
+          message: error.message,
+          retryable: error.retryable,
+          ...(error.details ? { details: error.details } : {}),
+        },
+      },
+    };
+  }
   const message = safeErrorMessage(error);
   return { isError: true, content: [{ type: 'text', text: message }] };
 }

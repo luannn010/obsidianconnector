@@ -3,6 +3,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { getConfigPath, loadDotEnv, VaultRegistry } from './config/registry.js';
 import { createServer } from './server.js';
+import { getRuntimeConfig } from './knowledge/config.js';
+import { OpenAiCompatibleEmbeddingClient } from './knowledge/embedding-client.js';
+import { createPgKnowledgeStore } from './knowledge/pg-store.js';
 
 export async function main(): Promise<void> {
   const projectRoot = path.resolve(
@@ -13,7 +16,30 @@ export async function main(): Promise<void> {
   const registry = await VaultRegistry.load(
     getConfigPath({ cwd: projectRoot }),
   );
-  const server = createServer(registry);
+  const runtime = getRuntimeConfig();
+  const database = runtime.databaseUrl
+    ? createPgKnowledgeStore(
+        runtime.databaseUrl,
+        runtime.poolMax,
+        runtime.statementTimeoutMs,
+        {
+          ...(runtime.embeddingBaseUrl
+            ? {
+                embedder: new OpenAiCompatibleEmbeddingClient(
+                  runtime.embeddingBaseUrl,
+                  runtime.embeddingModel,
+                  runtime.embeddingDimensions,
+                ),
+              }
+            : {}),
+          rerankerEnabled: runtime.rerankerEnabled,
+        },
+      )
+    : undefined;
+  const server = createServer(registry, {
+    profile: runtime.profile,
+    ...(database ? { knowledge: database.store } : {}),
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
