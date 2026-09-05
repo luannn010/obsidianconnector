@@ -7,6 +7,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -51,6 +52,14 @@ export function loadDotEnv(
         ? value.slice(1, -1)
         : value;
   }
+}
+
+export function loadProjectKnowledgeEnvironment(
+  projectRoot: string,
+  homeDirectory = os.homedir(),
+): void {
+  loadDotEnv(path.join(homeDirectory, '.codex', 'project-knowledge.env'));
+  loadDotEnv(path.join(projectRoot, '.env'));
 }
 
 function isWithinRoot(root: string, candidate: string): boolean {

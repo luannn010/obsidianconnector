@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   getConfigPath,
   loadDotEnv,
+  loadProjectKnowledgeEnvironment,
   VaultRegistry,
 } from '../../src/config/registry.js';
 
@@ -21,6 +22,7 @@ async function makeTempDirectory(): Promise<string> {
 afterEach(async () => {
   delete process.env.OBSIDIAN_MCP_CONFIG;
   delete process.env.OBSIDIAN_VAULT_ROOT;
+  delete process.env.PROJECT_KNOWLEDGE_DATABASE_URL;
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -170,6 +172,28 @@ describe('configuration and vault registry', () => {
     loadDotEnv(envPath);
 
     expect(process.env.OBSIDIAN_VAULT_ROOT).toBe('G:\\My Drive\\.obsidian');
+  });
+
+  it('loads protected home defaults before repository dotenv values', async () => {
+    const directory = await makeTempDirectory();
+    const home = path.join(directory, 'home');
+    const project = path.join(directory, 'project');
+    await mkdir(path.join(home, '.codex'), { recursive: true });
+    await mkdir(project, { recursive: true });
+    await writeFile(
+      path.join(home, '.codex', 'project-knowledge.env'),
+      'PROJECT_KNOWLEDGE_DATABASE_URL=postgresql://home/default\n',
+    );
+    await writeFile(
+      path.join(project, '.env'),
+      'PROJECT_KNOWLEDGE_DATABASE_URL=postgresql://repository/fallback\n',
+    );
+
+    loadProjectKnowledgeEnvironment(project, home);
+
+    expect(process.env.PROJECT_KNOWLEDGE_DATABASE_URL).toBe(
+      'postgresql://home/default',
+    );
   });
 
   it('rejects invalid names and duplicate registrations', async () => {

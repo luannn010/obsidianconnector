@@ -13,6 +13,11 @@ describe('activity runtime installer', () => {
     expect(script).toContain(
       "Join-Path $ProjectPath '.claude\\settings.local.json'",
     );
+    expect(script).toContain("shell = 'powershell'");
+    expect(script).toContain("$claudeHookBase = '& ");
+    expect(script).toContain("Join-Path $ProjectPath '.mcp.json'");
+    expect(script).toContain("Join-Path $HOME '.claude\\skills'");
+    expect(script).toContain("OBSIDIAN_MCP_PROFILE = 'standard'");
     expect(script).not.toContain("Join-Path $HOME '.codex\\hooks.json'");
   });
 });

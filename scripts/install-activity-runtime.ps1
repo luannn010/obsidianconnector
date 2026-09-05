@@ -80,8 +80,69 @@ function Add-CommandHook(
   $Configuration.hooks[$Event] = @($Configuration.hooks[$Event]) + @($group)
 }
 
+function Add-ClaudeCommandHook(
+  [hashtable]$Configuration,
+  [string]$Event,
+  [string]$Command,
+  [bool]$Async,
+  [string]$Matcher = ''
+) {
+  if (-not $Configuration.ContainsKey('hooks')) { $Configuration.hooks = @{} }
+  if (-not $Configuration.hooks.ContainsKey($Event)) { $Configuration.hooks[$Event] = @() }
+  $shelllessCommand = if ($Command.StartsWith('& ')) { $Command.Substring(2) } else { $Command }
+  foreach ($group in @($Configuration.hooks[$Event])) {
+    foreach ($handler in @($group.hooks)) {
+      if (
+        $handler.command -eq $Command -or
+        $handler.command -eq $shelllessCommand -or
+        $handler.commandWindows -eq $Command -or
+        $handler.commandWindows -eq $shelllessCommand
+      ) {
+        $handler.command = $Command
+        $handler.shell = 'powershell'
+        $handler.timeout = 3
+        $handler.Remove('commandWindows')
+        if ($Async) { $handler.async = $true } else { $handler.Remove('async') }
+        if ($Matcher) { $group.matcher = $Matcher } else { $group.Remove('matcher') }
+        return
+      }
+    }
+  }
+  $handler = @{ type = 'command'; command = $Command; shell = 'powershell'; timeout = 3 }
+  if ($Async) { $handler.async = $true }
+  $group = @{ hooks = @($handler) }
+  if ($Matcher) { $group.matcher = $Matcher }
+  $Configuration.hooks[$Event] = @($Configuration.hooks[$Event]) + @($group)
+}
+
 $node = (Get-Command node -ErrorAction Stop).Source
 $hookBase = '"{0}" "{1}" --agent' -f $node, $hookEntrypoint
+$claudeHookBase = '& "{0}" "{1}" --agent' -f $node, $hookEntrypoint
+$mcpEntrypoint = Join-Path $RepositoryPath 'dist\index.js'
+$mcpPath = Join-Path $ProjectPath '.mcp.json'
+$mcp = Read-JsonMap $mcpPath
+if (-not $mcp.ContainsKey('mcpServers')) { $mcp.mcpServers = @{} }
+$mcpEnvironment = @{}
+if ($mcp.mcpServers.ContainsKey('obsidian-local') -and $mcp.mcpServers['obsidian-local'].env) {
+  foreach ($entry in $mcp.mcpServers['obsidian-local'].env.GetEnumerator()) {
+    $mcpEnvironment[$entry.Key] = $entry.Value
+  }
+}
+if (-not $mcpEnvironment.ContainsKey('OBSIDIAN_MCP_CONFIG')) {
+  $mcpEnvironment.OBSIDIAN_MCP_CONFIG = Join-Path $RepositoryPath 'config\vaults.json'
+}
+if (-not $mcpEnvironment.ContainsKey('OBSIDIAN_VAULT_ROOT')) {
+  $mcpEnvironment.OBSIDIAN_VAULT_ROOT = 'G:\My Drive\.obsidian'
+}
+$mcpEnvironment.OBSIDIAN_MCP_PROFILE = 'standard'
+$mcp.mcpServers['obsidian-local'] = @{
+  type = 'stdio'
+  command = $node
+  args = @($mcpEntrypoint)
+  env = $mcpEnvironment
+}
+$mcp | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $mcpPath -Encoding utf8NoBOM
+
 $codexPath = Join-Path $ProjectPath '.codex\hooks.json'
 $codex = Read-JsonMap $codexPath
 foreach ($event in @('SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'SessionEnd')) {
@@ -93,11 +154,24 @@ $codex | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $codexPath -Encodi
 $claudePath = Join-Path $ProjectPath '.claude\settings.local.json'
 $claude = Read-JsonMap $claudePath
 foreach ($event in @('SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd')) {
-  Add-CommandHook $claude $event "$hookBase claude" $false
+  Add-ClaudeCommandHook $claude $event "$claudeHookBase claude" $false
 }
-Add-CommandHook $claude 'PostToolUse' "$hookBase claude" $true 'Read|Write|Edit|Bash|Grep|Glob'
+Add-ClaudeCommandHook $claude 'PostToolUse' "$claudeHookBase claude" $true 'Read|Write|Edit|Bash|Grep|Glob'
 New-Item -ItemType Directory -Path (Split-Path -Parent $claudePath) -Force | Out-Null
 $claude | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $claudePath -Encoding utf8NoBOM
+
+$claudeSkillsRoot = Join-Path $HOME '.claude\skills'
+New-Item -ItemType Directory -Path $claudeSkillsRoot -Force | Out-Null
+foreach ($skillSource in @(
+  (Join-Path $RepositoryPath '.codex\skills\project-to-obsidian'),
+  (Join-Path $HOME '.codex\skills\project-knowledge-server')
+)) {
+  if (-not (Test-Path -LiteralPath (Join-Path $skillSource 'SKILL.md') -PathType Leaf)) { continue }
+  $skillName = Split-Path -Leaf $skillSource
+  $skillDestination = Join-Path $claudeSkillsRoot $skillName
+  New-Item -ItemType Directory -Path $skillDestination -Force | Out-Null
+  Get-ChildItem -LiteralPath $skillSource -Force | Copy-Item -Destination $skillDestination -Recurse -Force
+}
 
 if (-not $SkipScheduledTask) {
   $powershell = (Get-Command pwsh -ErrorAction Stop).Source
@@ -113,6 +187,8 @@ if (-not $SkipScheduledTask) {
   activityEndpoint = 'http://127.0.0.1:8765'
   codexHooks = $codexPath
   claudeHooks = $claudePath
+  claudeSkills = $claudeSkillsRoot
+  mcpConfiguration = $mcpPath
   scheduledTask = if ($SkipScheduledTask) { 'skipped' } else { 'ObsidianProjectKnowledgeActivity, ObsidianProjectKnowledgeWorker' }
   token = '<stored securely>'
 }

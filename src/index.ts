@@ -1,7 +1,11 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { getConfigPath, loadDotEnv, VaultRegistry } from './config/registry.js';
+import {
+  getConfigPath,
+  loadProjectKnowledgeEnvironment,
+  VaultRegistry,
+} from './config/registry.js';
 import { createServer } from './server.js';
 import { getRuntimeConfig } from './knowledge/config.js';
 import {
@@ -15,7 +19,7 @@ export async function main(): Promise<void> {
     path.dirname(fileURLToPath(import.meta.url)),
     '..',
   );
-  loadDotEnv(path.join(projectRoot, '.env'));
+  loadProjectKnowledgeEnvironment(projectRoot);
   const registry = await VaultRegistry.load(
     getConfigPath({ cwd: projectRoot }),
   );
