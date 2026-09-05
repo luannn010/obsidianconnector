@@ -10,6 +10,9 @@ export interface ContextHit {
   excerpt: string;
   citation: string;
   contentHash: string;
+  itemId?: string;
+  itemVersion?: number;
+  stableKey?: string;
   estimatedTokens?: number;
   path?: string;
   symbol?: string;

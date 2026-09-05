@@ -35,6 +35,9 @@ function searchPool(count: number): PgPoolLike {
     title: `Result ${index + 1}`,
     content: `Architecture result ${index + 1}`,
     content_hash: `hash-${index + 1}`,
+    item_id: index === 0 ? '10000000-0000-4000-8000-000000000001' : null,
+    item_version: index === 0 ? 7 : null,
+    stable_key: index === 0 ? 'architecture:authentication' : null,
     metadata: { citation: `result-${index + 1}` },
     head_commit: null,
     db_revision: 4,
@@ -107,6 +110,11 @@ describe('PostgreSQL knowledge store', () => {
       'Result 1',
       'Result 2',
     ]);
+    expect(result.results[0]).toMatchObject({
+      itemId: '10000000-0000-4000-8000-000000000001',
+      itemVersion: 7,
+      stableKey: 'architecture:authentication',
+    });
   });
 
   it('falls back to BM25 and reranks only the leading hybrid candidates when embeddings are unavailable', async () => {

@@ -68,6 +68,9 @@ interface ChunkRow extends QueryResultRow {
   title: string;
   content: string;
   content_hash: string;
+  item_id: string | null;
+  item_version: number | null;
+  stable_key: string | null;
   metadata: Record<string, unknown>;
   head_commit: string | null;
   db_revision: number;
@@ -121,6 +124,11 @@ function hitFromChunk(row: ChunkRow, full = false): ContextHit {
     excerpt: content,
     citation: String(metadata.citation ?? metadata.path ?? row.title),
     contentHash: row.content_hash,
+    ...(row.item_id ? { itemId: row.item_id } : {}),
+    ...(row.item_version !== null && row.item_version !== undefined
+      ? { itemVersion: Number(row.item_version) }
+      : {}),
+    ...(row.stable_key ? { stableKey: row.stable_key } : {}),
     estimatedTokens: countSerializedTokens(content),
     ...(typeof metadata.path === 'string' ? { path: metadata.path } : {}),
     ...(typeof metadata.symbol === 'string' ? { symbol: metadata.symbol } : {}),
@@ -184,8 +192,10 @@ export class PgKnowledgeStore implements KnowledgeStore {
       const items = await this.pool.query<ChunkRow>(
         `
         SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata,
+               c.item_id, i.current_version AS item_version, i.stable_key,
                $3::text AS head_commit, $4::bigint AS db_revision
         FROM project_knowledge.search_chunks c
+        LEFT JOIN project_knowledge.knowledge_items i ON i.id=c.item_id AND i.project_id=c.project_id
         WHERE c.project_id = $1 AND c.active AND (c.snapshot_id IS NULL OR c.snapshot_id = $2)
           AND c.kind = ANY($5::text[])
         ORDER BY CASE c.kind WHEN 'architecture' THEN 0 WHEN 'active_work' THEN 1 WHEN 'completed_work' THEN 2 ELSE 3 END,
@@ -304,8 +314,10 @@ export class PgKnowledgeStore implements KnowledgeStore {
         const result = await this.pool.query<ChunkRow>(
           `
           SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata,
+                 c.item_id, i.current_version AS item_version, i.stable_key,
                  s.head_commit, $4::bigint AS db_revision
           FROM project_knowledge.search_chunks c
+          LEFT JOIN project_knowledge.knowledge_items i ON i.id=c.item_id AND i.project_id=c.project_id
           LEFT JOIN project_knowledge.source_snapshots s ON s.id = c.snapshot_id
           WHERE c.project_id = $1 AND c.active AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id = $2)
             AND ($3 = c.parent_ref OR lower(c.title) = lower($3)
@@ -364,9 +376,12 @@ export class PgKnowledgeStore implements KnowledgeStore {
             FROM project_knowledge.search_chunks
             WHERE project_id = $1 AND active AND embedding IS NOT NULL ORDER BY embedding <=> $5::vector LIMIT $4
           )
-          SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata, s.head_commit, $9::bigint AS db_revision,
+          SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata,
+                 c.item_id, i.current_version AS item_version, i.stable_key,
+                 s.head_commit, $9::bigint AS db_revision,
                  COALESCE(1.0/(60+b.rank),0)+COALESCE(1.0/(60+v.rank),0) AS score
           FROM project_knowledge.search_chunks c LEFT JOIN bm25 b ON b.id=c.id LEFT JOIN vector v ON v.id=c.id
+          LEFT JOIN project_knowledge.knowledge_items i ON i.id=c.item_id AND i.project_id=c.project_id
           LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
           WHERE (b.id IS NOT NULL OR v.id IS NOT NULL) AND c.project_id=$1 AND c.active
             AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$2)
@@ -379,8 +394,11 @@ export class PgKnowledgeStore implements KnowledgeStore {
             SELECT id,paradedb.score(id) AS score FROM project_knowledge.search_chunks
             WHERE content @@@ $3 AND project_id=$1 AND active ORDER BY score DESC LIMIT $4 OFFSET ${offset}
           )
-          SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata, s.head_commit, $9::bigint AS db_revision
+          SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata,
+                 c.item_id, i.current_version AS item_version, i.stable_key,
+                 s.head_commit, $9::bigint AS db_revision
           FROM bm25 b JOIN project_knowledge.search_chunks c ON c.id=b.id
+          LEFT JOIN project_knowledge.knowledge_items i ON i.id=c.item_id AND i.project_id=c.project_id
           LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
           WHERE c.project_id=$1 AND $5::text IS NULL
             AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$2)
@@ -437,8 +455,11 @@ export class PgKnowledgeStore implements KnowledgeStore {
         .map((ref) => ref.slice(6));
       const result = await this.pool.query<ChunkRow>(
         `
-        SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata, s.head_commit, p.db_revision
+        SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata,
+               c.item_id, i.current_version AS item_version, i.stable_key,
+               s.head_commit, p.db_revision
         FROM project_knowledge.search_chunks c JOIN project_knowledge.projects p ON p.project_id=c.project_id
+        LEFT JOIN project_knowledge.knowledge_items i ON i.id=c.item_id AND i.project_id=c.project_id
         LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
         WHERE p.project_key=$1 AND c.active AND c.id=ANY($2::uuid[]) AND ($3::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$3)
       `,

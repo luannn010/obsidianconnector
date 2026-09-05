@@ -1,6 +1,6 @@
 ---
 name: project-to-obsidian
-description: Retrieve and update versioned project knowledge through the compact obsidian-local MCP profile while keeping Obsidian as its generated human-readable view and Inbox.
+description: Use when retrieving, updating, or publishing project knowledge through the SQL-backed obsidian-local MCP server.
 ---
 
 # Project to Obsidian
@@ -14,6 +14,15 @@ description: Retrieve and update versioned project knowledge through the compact
 - Use `search_project_context` to discover context. Exact paths, symbols, routes, tables, IDs, and worktree names use `auto` or `exact`; conceptual questions use `hybrid`.
 - Use `expand_project_context` only for returned references that are needed. Do not recursively scan the repository or vault for routine context.
 - Open the exact source file before editing executable code when freshness matters.
+
+## Response contract
+
+- Read returned records from MCP `structuredContent`; the text block is only a compact summary.
+- Carry `snapshotId` from the snapshot into search and expansion. Carry `dbRevision` into optimistic writes.
+- A writable canonical hit exposes `itemId`, `itemVersion`, and `stableKey`. Use `itemId` plus `itemVersion` for patch or append. A hit without them is source-derived evidence; create a canonical correction with its citation instead of guessing an item identity.
+- Pass expansion handles in the `refs` array. Expand no more than eight references and request only the needed view.
+- Respect each response's complete `budget`, `warnings`, `omissions`, freshness, hashes, and continuation cursor.
+- If hybrid embeddings or reranking are unavailable, use the returned exact/BM25 results and report the degraded warning.
 
 ## Writes and human publication
 
