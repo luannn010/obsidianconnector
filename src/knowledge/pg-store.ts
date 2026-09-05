@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Pool, type QueryResultRow } from 'pg';
 import { canonicalHash } from './hash.js';
 import { KnowledgeError } from './errors.js';
@@ -323,11 +323,13 @@ export class PgKnowledgeStore implements KnowledgeStore {
         rows = result.rows;
       }
       const warnings: string[] = [];
+      let usedHybridRetrieval = false;
       if (
         rows.length === 0 &&
         input.mode !== 'exact' &&
         input.mode !== 'structured'
       ) {
+        usedHybridRetrieval = true;
         let embedding: number[] | undefined;
         if (this.options.embedder) {
           try {
@@ -392,6 +394,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
         ...new Map(rows.map((row) => [row.id, hitFromChunk(row)])).values(),
       ];
       if (
+        usedHybridRetrieval &&
         this.options.rerankerEnabled &&
         this.options.reranker &&
         hits.length > 1
@@ -776,13 +779,31 @@ export async function applyKnowledgeMigrations(
     await client.query(
       "SELECT pg_advisory_lock(hashtext('obsidian-local-project-knowledge-migrations'))",
     );
+    const ledger = await client.query<{ exists: boolean }>(
+      "SELECT to_regclass('project_knowledge.schema_migrations') IS NOT NULL AS exists",
+    );
     for (const migration of migrations) {
+      const checksum = createHash('sha256').update(migration.sql).digest('hex');
+      if (ledger.rows[0]?.exists) {
+        const applied = await client.query<{ checksum: string }>(
+          'SELECT checksum FROM project_knowledge.schema_migrations WHERE id=$1',
+          [migration.id],
+        );
+        if (applied.rows[0]) {
+          if (applied.rows[0].checksum !== checksum) {
+            throw new Error(
+              `Migration ${migration.id} checksum does not match the applied migration`,
+            );
+          }
+          continue;
+        }
+      }
       await client.query('BEGIN');
       try {
         await client.query(migration.sql);
         await client.query(
-          'INSERT INTO project_knowledge.schema_migrations(id) VALUES($1) ON CONFLICT (id) DO NOTHING',
-          [migration.id],
+          'INSERT INTO project_knowledge.schema_migrations(id,checksum) VALUES($1,$2)',
+          [migration.id, checksum],
         );
         await client.query('COMMIT');
       } catch (error) {

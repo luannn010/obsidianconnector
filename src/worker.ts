@@ -8,6 +8,7 @@ import {
   KnowledgeWorker,
   type WorkerProject,
 } from './worker/knowledge-worker.js';
+import { drainQueueBatches } from './worker/drain-queue.js';
 
 loadDotEnv();
 const runtime = getRuntimeConfig({
@@ -40,6 +41,7 @@ const embedder = runtime.embeddingBaseUrl
       runtime.embeddingBaseUrl,
       runtime.embeddingModel,
       runtime.embeddingDimensions,
+      runtime.embeddingToken,
     )
   : undefined;
 const worker = new KnowledgeWorker(pool, embedder, {
@@ -65,7 +67,10 @@ async function synchronize(): Promise<void> {
       const documents = await worker.syncCanonicalDocuments(project);
       const structured = await worker.syncStructuredDocumentation(project);
       const inbox = await worker.processInbox(project);
-      const embeddings = await worker.processEmbeddings();
+      const embeddings = await drainQueueBatches(
+        () => worker.processEmbeddings(),
+        50,
+      );
       const projections = await worker.publishVault(project);
       console.error(
         JSON.stringify({

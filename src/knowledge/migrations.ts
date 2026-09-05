@@ -14,6 +14,7 @@ CREATE SCHEMA IF NOT EXISTS project_knowledge;
 
 CREATE TABLE IF NOT EXISTS project_knowledge.schema_migrations (
   id text PRIMARY KEY,
+  checksum text NOT NULL,
   applied_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS project_knowledge.projects (
@@ -38,6 +39,12 @@ CREATE TABLE IF NOT EXISTS project_knowledge.source_snapshots (
   state text NOT NULL CHECK (state IN ('building','active','failed','superseded')),
   created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz
 );
+CREATE UNIQUE INDEX IF NOT EXISTS source_snapshots_one_active_worktree
+  ON project_knowledge.source_snapshots(worktree_id) WHERE state='active';
+CREATE INDEX IF NOT EXISTS source_snapshots_active_lookup
+  ON project_knowledge.source_snapshots(project_id,worktree_id,activated_at DESC) WHERE state='active';
+CREATE INDEX IF NOT EXISTS worktrees_repository_project
+  ON project_knowledge.worktrees(repository_id,project_id);
 CREATE TABLE IF NOT EXISTS project_knowledge.knowledge_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
   kind text NOT NULL, stable_key text NOT NULL, title text NOT NULL, current_version integer NOT NULL DEFAULT 1,
@@ -192,15 +199,22 @@ CREATE TABLE IF NOT EXISTS project_knowledge.search_chunks (
   item_id uuid REFERENCES project_knowledge.knowledge_items(id), snapshot_id uuid REFERENCES project_knowledge.source_snapshots(id),
   parent_ref text, kind text NOT NULL, domain text, service text, worktree_id uuid REFERENCES project_knowledge.worktrees(id),
   title text NOT NULL, content text NOT NULL, content_hash text NOT NULL, token_count integer NOT NULL,
-  embedding vector(1024), embedding_model_id uuid REFERENCES project_knowledge.embedding_models(id), active boolean NOT NULL DEFAULT true,
+  embedding vector(384), embedding_model_id uuid REFERENCES project_knowledge.embedding_models(id), active boolean NOT NULL DEFAULT true,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 ALTER TABLE project_knowledge.search_chunks ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
 CREATE INDEX IF NOT EXISTS search_chunks_snapshot ON project_knowledge.search_chunks (project_id, snapshot_id);
-CREATE INDEX IF NOT EXISTS search_chunks_exact_path ON project_knowledge.search_chunks (project_id, (metadata->>'path'));
-CREATE INDEX IF NOT EXISTS search_chunks_exact_symbol ON project_knowledge.search_chunks (project_id, (metadata->>'symbol'));
+CREATE INDEX IF NOT EXISTS search_chunks_exact_path ON project_knowledge.search_chunks(project_id,lower(metadata->>'path')) WHERE active;
+CREATE INDEX IF NOT EXISTS search_chunks_exact_symbol ON project_knowledge.search_chunks(project_id,lower(metadata->>'symbol')) WHERE active;
+CREATE INDEX IF NOT EXISTS search_chunks_active_item ON project_knowledge.search_chunks(project_id,item_id) WHERE active;
+CREATE INDEX IF NOT EXISTS search_chunks_exact_title ON project_knowledge.search_chunks(project_id,lower(title)) WHERE active;
+CREATE INDEX IF NOT EXISTS search_chunks_exact_endpoint ON project_knowledge.search_chunks(project_id,lower(metadata->>'endpoint')) WHERE active;
+CREATE INDEX IF NOT EXISTS search_chunks_exact_schema_table ON project_knowledge.search_chunks(project_id,lower(metadata->>'schema_table')) WHERE active;
+CREATE INDEX IF NOT EXISTS search_chunks_parent_ref ON project_knowledge.search_chunks(project_id,parent_ref) WHERE active;
 CREATE INDEX IF NOT EXISTS search_chunks_embedding_hnsw ON project_knowledge.search_chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS search_chunks_content_bm25 ON project_knowledge.search_chunks USING bm25 (id, content) WITH (key_field='id');
+CREATE INDEX IF NOT EXISTS search_chunks_content_bm25 ON project_knowledge.search_chunks
+  USING bm25 (id, content, title, project_id, active, snapshot_id, kind, domain, service, worktree_id)
+  WITH (key_field='id');
 CREATE TABLE IF NOT EXISTS project_knowledge.note_projections (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
   view_id text NOT NULL, relative_path text NOT NULL, db_revision bigint NOT NULL, canonical_hash text NOT NULL,
@@ -208,11 +222,18 @@ CREATE TABLE IF NOT EXISTS project_knowledge.note_projections (
   state text NOT NULL CHECK (state IN ('current','pending','drifted','missing','failed')),
   error_message text, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(project_id, view_id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS note_projections_output_path
+  ON project_knowledge.note_projections(project_id,relative_path);
+CREATE INDEX IF NOT EXISTS note_projections_state_path
+  ON project_knowledge.note_projections(project_id,state,relative_path);
 CREATE TABLE IF NOT EXISTS project_knowledge.outbox_jobs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
   job_type text NOT NULL, payload jsonb NOT NULL, state text NOT NULL DEFAULT 'pending', attempts integer NOT NULL DEFAULT 0,
   available_at timestamptz NOT NULL DEFAULT now(), locked_at timestamptz, last_error text, created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS outbox_jobs_claimable
+  ON project_knowledge.outbox_jobs(job_type,available_at,created_at)
+  WHERE state IN ('pending','failed');
 CREATE TABLE IF NOT EXISTS project_knowledge.sync_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
   started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz, status text NOT NULL, summary jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -228,6 +249,9 @@ CREATE TABLE IF NOT EXISTS project_knowledge.projection_conflicts (
   projection_id uuid NOT NULL REFERENCES project_knowledge.note_projections(id), expected_hash text NOT NULL, observed_hash text NOT NULL,
   preserved_path text NOT NULL, resolved_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS projection_conflicts_unresolved
+  ON project_knowledge.projection_conflicts(project_id,created_at)
+  WHERE resolved_at IS NULL;
 CREATE TABLE IF NOT EXISTS project_knowledge.legacy_sources (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
   original_path text NOT NULL, archive_path text, raw_hash text NOT NULL, size_bytes bigint NOT NULL, modified_at timestamptz,

@@ -4,7 +4,10 @@ import path from 'node:path';
 import { getConfigPath, loadDotEnv, VaultRegistry } from './config/registry.js';
 import { createServer } from './server.js';
 import { getRuntimeConfig } from './knowledge/config.js';
-import { OpenAiCompatibleEmbeddingClient } from './knowledge/embedding-client.js';
+import {
+  HttpCrossEncoderReranker,
+  OpenAiCompatibleEmbeddingClient,
+} from './knowledge/embedding-client.js';
 import { createPgKnowledgeStore } from './knowledge/pg-store.js';
 
 export async function main(): Promise<void> {
@@ -29,6 +32,16 @@ export async function main(): Promise<void> {
                   runtime.embeddingBaseUrl,
                   runtime.embeddingModel,
                   runtime.embeddingDimensions,
+                  runtime.embeddingToken,
+                ),
+              }
+            : {}),
+          ...(runtime.rerankerEnabled && runtime.rerankerBaseUrl
+            ? {
+                reranker: new HttpCrossEncoderReranker(
+                  runtime.rerankerBaseUrl,
+                  runtime.rerankerModel,
+                  runtime.rerankerToken,
                 ),
               }
             : {}),

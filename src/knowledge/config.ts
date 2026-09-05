@@ -5,9 +5,13 @@ export interface RuntimeConfig {
   poolMax: number;
   statementTimeoutMs: number;
   embeddingBaseUrl?: string;
+  embeddingToken?: string;
   embeddingModel: string;
   embeddingDimensions: number;
   rerankerEnabled: boolean;
+  rerankerBaseUrl?: string;
+  rerankerModel: string;
+  rerankerToken?: string;
 }
 
 function boundedInteger(
@@ -33,6 +37,27 @@ export function getRuntimeConfig(
       'PROJECT_KNOWLEDGE_DATABASE_URL is required for the standard profile',
     );
   }
+  const embeddingBaseUrl =
+    env.PROJECT_KNOWLEDGE_EMBEDDING_BASE_URL?.trim() || undefined;
+  const embeddingToken =
+    env.PROJECT_KNOWLEDGE_EMBEDDING_TOKEN?.trim() || undefined;
+  if (embeddingBaseUrl && !embeddingToken)
+    throw new Error(
+      'PROJECT_KNOWLEDGE_EMBEDDING_TOKEN is required when the embedding endpoint is configured',
+    );
+  const rerankerEnabled = env.PROJECT_KNOWLEDGE_RERANKER_ENABLED === 'true';
+  const rerankerBaseUrl =
+    env.PROJECT_KNOWLEDGE_RERANKER_BASE_URL?.trim() || embeddingBaseUrl;
+  const rerankerToken =
+    env.PROJECT_KNOWLEDGE_RERANKER_TOKEN?.trim() || embeddingToken;
+  if (rerankerEnabled && !rerankerBaseUrl)
+    throw new Error(
+      'PROJECT_KNOWLEDGE_RERANKER_BASE_URL is required when the reranker is enabled',
+    );
+  if (rerankerEnabled && !rerankerToken)
+    throw new Error(
+      'PROJECT_KNOWLEDGE_RERANKER_TOKEN is required when the reranker is enabled',
+    );
   return {
     profile,
     databaseUrl,
@@ -45,16 +70,21 @@ export function getRuntimeConfig(
       100,
       30_000,
     ),
-    embeddingBaseUrl:
-      env.PROJECT_KNOWLEDGE_EMBEDDING_BASE_URL?.trim() || undefined,
+    embeddingBaseUrl,
+    embeddingToken,
     embeddingModel:
-      env.PROJECT_KNOWLEDGE_EMBEDDING_MODEL?.trim() || 'bge-large-en-v1.5',
+      env.PROJECT_KNOWLEDGE_EMBEDDING_MODEL?.trim() || 'BAAI/bge-small-en-v1.5',
     embeddingDimensions: boundedInteger(
       env.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS,
-      1024,
+      384,
       1,
       4096,
     ),
-    rerankerEnabled: env.PROJECT_KNOWLEDGE_RERANKER_ENABLED === 'true',
+    rerankerEnabled,
+    rerankerBaseUrl,
+    rerankerModel:
+      env.PROJECT_KNOWLEDGE_RERANKER_MODEL?.trim() ||
+      'cross-encoder/ms-marco-MiniLM-L-6-v2',
+    rerankerToken,
   };
 }

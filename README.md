@@ -195,6 +195,15 @@ npm run knowledge:worker
 
 The worker fingerprints branch, HEAD, porcelain status, and dirty state. It reuses an active immutable snapshot when these match, or indexes only changed/renamed/deleted files. Canonical knowledge writes synchronously update version history and BM25 content, then queue embedding and Markdown projection work. Embedding failure leaves exact and BM25 retrieval available.
 
+The optional local retrieval service uses `BAAI/bge-small-en-v1.5` with 384-dimensional vectors and `cross-encoder/ms-marco-MiniLM-L-6-v2` for reranking. Start it with a private Bearer token, then configure the connector's embedding and reranker tokens with the same value when both clients use this service:
+
+```powershell
+$env:RETRIEVAL_MODEL_BEARER_TOKEN='replace-with-a-long-random-token'
+docker compose -f services/retrieval-model/compose.yaml up -d --build
+```
+
+Model requests are bounded to two concurrent executions and the container is limited to 4 GiB by default. Set `RETRIEVAL_MODEL_MAX_CONCURRENCY` to another value from 1 through 8 or `RETRIEVAL_MODEL_MEMORY_LIMIT` to another Compose memory value before startup. The unauthenticated health route exposes only model names, dimensions, concurrency, and authentication mode; embedding and `/v1/rerank` requests require Bearer authentication.
+
 Generated pages live under `Published/` during dual-run validation. Human edits belong in `Inbox/`; a generated-page edit is preserved in `Inbox/Conflicts` and reported as projection drift. Managed hashes use canonical JSON SHA-256 for records and normalized UTF-8/LF Markdown SHA-256 excluding volatile managed frontmatter.
 
 The PostgreSQL role should have `USAGE` on `project_knowledge` and DML only for that schema, with no application-schema DML. Keep the pool small and use the configured statement timeout. Run the schema migration with a local database owner before switching the connector to the restricted role.
