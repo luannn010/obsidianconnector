@@ -1,10 +1,18 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { getConfigPath, loadDotEnv, VaultRegistry } from './config/registry.js';
 import { createServer } from './server.js';
 
 export async function main(): Promise<void> {
-  loadDotEnv();
-  const registry = await VaultRegistry.load(getConfigPath());
+  const projectRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+  );
+  loadDotEnv(path.join(projectRoot, '.env'));
+  const registry = await VaultRegistry.load(
+    getConfigPath({ cwd: projectRoot }),
+  );
   const server = createServer(registry);
   const transport = new StdioServerTransport();
   await server.connect(transport);

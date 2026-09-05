@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import {
   VaultsFileSchema,
   type DailyNotesConfig,
+  type CodebaseIndexConfig,
   type VaultConfig,
 } from './schema.js';
 
@@ -65,7 +66,7 @@ function isWithinRoot(root: string, candidate: string): boolean {
 export function getConfigPath(options: ConfigPathOptions = {}): string {
   const configured = process.env.OBSIDIAN_MCP_CONFIG;
   if (configured?.trim()) {
-    return path.resolve(configured);
+    return path.resolve(options.cwd ?? process.cwd(), configured);
   }
   return path.resolve(options.cwd ?? process.cwd(), 'config', 'vaults.json');
 }
@@ -157,6 +158,7 @@ export class VaultRegistry {
       .map((vault) => ({
         ...vault,
         dailyNotes: { ...vault.dailyNotes },
+        codebaseIndex: { ...vault.codebaseIndex },
       }));
   }
 
@@ -165,7 +167,11 @@ export class VaultRegistry {
     if (!vault) {
       throw new Error(`Vault is not registered: ${name}`);
     }
-    return { ...vault, dailyNotes: { ...vault.dailyNotes } };
+    return {
+      ...vault,
+      dailyNotes: { ...vault.dailyNotes },
+      codebaseIndex: { ...vault.codebaseIndex },
+    };
   }
 
   async register(
@@ -173,6 +179,7 @@ export class VaultRegistry {
     directory: string,
     readOnly = false,
     dailyNotes?: Partial<DailyNotesConfig>,
+    codebaseIndex?: Partial<CodebaseIndexConfig>,
   ): Promise<RegisteredVault> {
     const normalizedName = validateName(name);
     if (this.vaults.has(normalizedName)) {
@@ -186,6 +193,11 @@ export class VaultRegistry {
         directory: dailyNotes?.directory?.trim() || 'Daily',
         dateFormat: dailyNotes?.dateFormat?.trim() || 'YYYY-MM-DD',
       },
+      codebaseIndex: {
+        manifest: codebaseIndex?.manifest?.trim() || 'Codebase Index.md',
+        maxAgeDays: codebaseIndex?.maxAgeDays ?? 30,
+        roles: { ...(codebaseIndex?.roles ?? {}) },
+      },
     };
     this.vaults.set(normalizedName, vault);
     await this.persist();
@@ -196,11 +208,18 @@ export class VaultRegistry {
     name: string,
     readOnly = false,
     dailyNotes?: Partial<DailyNotesConfig>,
+    codebaseIndex?: Partial<CodebaseIndexConfig>,
   ): Promise<RegisteredVault> {
     const normalizedName = validateName(name);
     const directory = path.join(this.vaultRoot, normalizedName);
     await mkdir(directory, { recursive: true });
-    return this.register(normalizedName, directory, readOnly, dailyNotes);
+    return this.register(
+      normalizedName,
+      directory,
+      readOnly,
+      dailyNotes,
+      codebaseIndex,
+    );
   }
 
   async unregister(name: string): Promise<void> {
@@ -221,6 +240,7 @@ export class VaultRegistry {
               path: vault.path,
               readOnly: vault.readOnly,
               dailyNotes: vault.dailyNotes,
+              codebaseIndex: vault.codebaseIndex,
             },
           ]),
         ),

@@ -33,6 +33,10 @@ describe('configuration and vault registry', () => {
     expect(getConfigPath({ cwd: 'C:\\project' })).toBe(
       path.resolve('C:\\project', 'config', 'vaults.json'),
     );
+    process.env.OBSIDIAN_MCP_CONFIG = 'config/vaults.json';
+    expect(getConfigPath({ cwd: 'C:\\connector' })).toBe(
+      path.resolve('C:\\connector', 'config', 'vaults.json'),
+    );
     process.env.OBSIDIAN_MCP_CONFIG = 'C:\\custom\\vaults.json';
     expect(getConfigPath({ cwd: 'C:\\project' })).toBe(
       path.resolve('C:\\custom\\vaults.json'),
@@ -84,11 +88,20 @@ describe('configuration and vault registry', () => {
     const configPath = path.join(directory, 'vaults.json');
     const registry = await VaultRegistry.load(configPath);
 
-    await registry.register('notes', vault, true);
+    await registry.register('notes', vault, true, undefined, {
+      roles: { tasks: 'Plans/Tasks.md' },
+    });
     expect(registry.get('notes').readOnly).toBe(true);
+    expect(registry.get('notes').codebaseIndex.roles).toEqual({
+      tasks: 'Plans/Tasks.md',
+    });
     expect(
       JSON.parse(await readFile(configPath, 'utf8')).vaults.notes.path,
     ).toBe(path.resolve(vault));
+    expect(
+      JSON.parse(await readFile(configPath, 'utf8')).vaults.notes.codebaseIndex
+        .roles,
+    ).toEqual({ tasks: 'Plans/Tasks.md' });
 
     await registry.unregister('notes');
     expect(registry.list()).toEqual([]);
@@ -124,7 +137,6 @@ describe('configuration and vault registry', () => {
 
     await registry.register('inside', path.join(root, 'inside'));
     await registry.register('outside', outside);
-
     expect(registry.list().map((vault) => vault.name)).toEqual(['inside']);
   });
 

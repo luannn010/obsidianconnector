@@ -1,8 +1,10 @@
 import type { VaultRegistry } from '../config/registry.js';
+import type { CodebaseIndexConfig } from '../config/schema.js';
 import { SecurityError } from '../security/path-security.js';
 import type { FilesystemService } from './filesystem-service.js';
+import matter from 'gray-matter';
 
-const contextNotes = [
+const legacyContextNotes = [
   ['home', '00 - Project Home.md'],
   ['brief', '01 - Brief.md'],
   ['goals', '02 - Goals & Success Criteria.md'],
@@ -24,12 +26,16 @@ export interface ProjectContextNote {
   content?: string;
   contentHash?: string;
   truncated?: boolean;
+  metadata?: Record<string, unknown>;
+  verification?: { stale: boolean; gaps: string[] };
 }
 
 export interface ProjectContext {
   vault: string;
   notes: ProjectContextNote[];
   missing: string[];
+  indexManifest: Record<string, string>;
+  verificationGaps: Array<{ role: string; path: string; reason: string }>;
 }
 
 export interface ProjectTask {
@@ -84,25 +90,89 @@ function entriesFromNote(
     .map((entry) => ({ source, content: entry }));
 }
 
+function parseMetadata(content: string): Record<string, unknown> {
+  const parsed = matter(content).data;
+  return Object.fromEntries(Object.entries(parsed));
+}
+
+function roleMapFromMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, string> {
+  if (
+    metadata.roles &&
+    typeof metadata.roles === 'object' &&
+    !Array.isArray(metadata.roles)
+  ) {
+    return Object.fromEntries(
+      Object.entries(metadata.roles).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string',
+      ),
+    );
+  }
+  return {};
+}
+
 export class ProjectContextService {
   constructor(
     private readonly registry: VaultRegistry,
     private readonly files: FilesystemService,
   ) {}
 
+  private async resolveIndexManifest(
+    vaultName: string,
+    config: CodebaseIndexConfig,
+    verificationGaps?: ProjectContext['verificationGaps'],
+  ): Promise<Record<string, string>> {
+    const configuredRoles = config.roles ?? {};
+    let manifestRoles: Record<string, string> = {};
+    try {
+      const manifest = await this.files.readNote(vaultName, config.manifest);
+      manifestRoles = roleMapFromMetadata(parseMetadata(manifest.content));
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      if (Object.keys(configuredRoles).length === 0) {
+        verificationGaps?.push({
+          role: 'manifest',
+          path: config.manifest,
+          reason: 'missing_manifest',
+        });
+      }
+    }
+    return {
+      ...Object.fromEntries(legacyContextNotes),
+      ...manifestRoles,
+      ...configuredRoles,
+    };
+  }
+
   async getContext(
     vaultName: string,
     maxChars = 30000,
   ): Promise<ProjectContext> {
-    this.registry.get(vaultName);
+    const config = this.registry.get(vaultName).codebaseIndex;
     let remaining = Math.max(1000, Math.min(maxChars, 100000));
     const notes: ProjectContextNote[] = [];
     const missing: string[] = [];
-    for (const [role, relativePath] of contextNotes) {
+    const verificationGaps: ProjectContext['verificationGaps'] = [];
+    const indexManifest = await this.resolveIndexManifest(
+      vaultName,
+      config,
+      verificationGaps,
+    );
+    for (const [role, relativePath] of Object.entries(indexManifest)) {
       try {
         const note = await this.files.readNote(vaultName, relativePath);
         const bounded = boundedContent(note.content, remaining);
         remaining = Math.max(0, remaining - bounded.content.length);
+        const metadata = parseMetadata(note.content);
+        const verified =
+          typeof metadata.last_verified === 'string'
+            ? Date.parse(metadata.last_verified)
+            : NaN;
+        const stale =
+          !Number.isFinite(verified) ||
+          Date.now() - verified > config.maxAgeDays * 86400000;
+        const gaps = metadata.related_paths ? [] : ['related_paths'];
         notes.push({
           role,
           path: note.path,
@@ -110,14 +180,39 @@ export class ProjectContextService {
           content: bounded.content,
           contentHash: note.contentHash,
           truncated: bounded.truncated,
+          metadata,
+          verification: { stale, gaps },
         });
+        if (stale)
+          verificationGaps.push({
+            role,
+            path: relativePath,
+            reason: 'stale_verification',
+          });
+        for (const gap of gaps)
+          verificationGaps.push({
+            role,
+            path: relativePath,
+            reason: `missing_${gap}`,
+          });
       } catch (error) {
         if (!isMissing(error)) throw error;
         missing.push(relativePath);
         notes.push({ role, path: relativePath, exists: false });
+        verificationGaps.push({
+          role,
+          path: relativePath,
+          reason: 'missing_note',
+        });
       }
     }
-    return { vault: vaultName, notes, missing };
+    return {
+      vault: vaultName,
+      notes,
+      missing,
+      indexManifest,
+      verificationGaps,
+    };
   }
 
   async getActivity(
@@ -125,7 +220,12 @@ export class ProjectContextService {
     dailyLimit = 10,
     maxChars = 20000,
   ): Promise<ProjectActivity> {
-    this.registry.get(vaultName);
+    const vault = this.registry.get(vaultName);
+    const dailyDirectory = vault.dailyNotes.directory;
+    const indexManifest = await this.resolveIndexManifest(
+      vaultName,
+      vault.codebaseIndex,
+    );
     const activity: ProjectActivity = {
       vault: vaultName,
       tasks: [],
@@ -145,7 +245,8 @@ export class ProjectContextService {
       }
     };
 
-    const taskContent = await readOptional('06 - Tasks.md');
+    const taskPath = indexManifest.tasks ?? '06 - Tasks.md';
+    const taskContent = await readOptional(taskPath);
     if (taskContent) {
       for (const match of taskContent.matchAll(
         /^\s*-\s*\[([ xX])\]\s+(.+)$/gmu,
@@ -155,16 +256,16 @@ export class ProjectContextService {
           activity.tasks.push({
             completed: match[1]?.toLowerCase() === 'x',
             text,
-            source: '06 - Tasks.md',
+            source: taskPath,
           });
         }
       }
     }
 
     for (const [key, target] of [
-      ['decisions', '04 - Decisions.md'],
-      ['risks', '10 - Risks & Issues.md'],
-      ['changelog', '11 - Changelog.md'],
+      ['decisions', indexManifest.decisions ?? '04 - Decisions.md'],
+      ['risks', indexManifest.risks ?? '10 - Risks & Issues.md'],
+      ['changelog', indexManifest.changelog ?? '11 - Changelog.md'],
     ] as const) {
       const content = await readOptional(target);
       if (!content) continue;
@@ -172,7 +273,7 @@ export class ProjectContextService {
     }
 
     const dailyNotes = await this.files
-      .listNotes(vaultName, 'Daily')
+      .listNotes(vaultName, dailyDirectory)
       .catch((error: unknown) => {
         if (isMissing(error)) return [];
         throw error;

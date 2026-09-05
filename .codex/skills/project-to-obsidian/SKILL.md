@@ -1,6 +1,6 @@
 ---
 name: project-to-obsidian
-description: Organize ChatGPT project conversations into the matching Obsidian vault, creating structured Markdown notes, tasks, decisions, plans, research, and daily entries. Use when the user asks to note down, systematize, summarize, capture, or update project discussion in Obsidian, or asks to turn a ChatGPT project into an Obsidian vault.
+description: Organize project conversations into a matching Obsidian vault and maintain its codebase navigation index, verification metadata, tasks, decisions, plans, research, and daily entries.
 ---
 
 # Project to Obsidian
@@ -17,6 +17,23 @@ Turn project conversations into durable, linked Markdown notes in the correct Ob
 - Use `list_vaults` as the source of truth; it lists only registered vaults beneath `OBSIDIAN_VAULT_ROOT`.
 - If the vault is missing, or a matching folder exists but is not registered, ask for confirmation before creating or registering it.
 - If connector tools are unavailable, explain that the local Obsidian MCP connector must be connected and provide proposed Markdown instead of claiming it was written.
+
+## Codebase index
+
+For repositories, treat Obsidian as the navigation and planning source of truth, while Git and repository tests remain authoritative for implementation behavior. Use `get_project_context` first, then `verify_codebase_index` before implementation work.
+
+The configured manifest defaults to `Codebase Index.md`. Its frontmatter maps stable roles to notes:
+
+```yaml
+---
+roles:
+  repository_map: Codebase/Repository Map.md
+  ownership: Codebase/Ownership.md
+  api_contracts: Codebase/API Contracts.md
+---
+```
+
+Role notes should include `status`, `last_verified`, `repository_revision`, `owners`, and `related_paths`. After code changes, inspect the referenced source files and tests, then update the affected note with the new revision and verification date using `update_note` or `update_frontmatter`.
 
 ## Standard vault layout
 
@@ -63,7 +80,7 @@ Templates/
 
 ## Connector tool mapping
 
-Use `get_project_context` first when understanding a project. Use `get_project_activity` when answering what is currently being worked on or what should happen next. Other tools by intent are `list_vaults`, `get_vault`, `create_vault`, `register_vault`, `list_directory`, `create_directory`, `list_notes`, `read_note`, `create_note`, `update_note`, `append_note`, `search_notes`, `get_frontmatter`, `update_frontmatter`, `list_tags`, `list_backlinks`, and `append_daily_note`. Use `move_note` or `delete_note` only when explicitly requested.
+Use `get_project_context` first when understanding a project. Use `verify_codebase_index` to surface stale or missing index evidence, and `get_project_activity` when answering what is currently being worked on or what should happen next. Other tools by intent are `list_vaults`, `get_vault`, `create_vault`, `register_vault`, `list_directory`, `create_directory`, `list_notes`, `read_note`, `create_note`, `update_note`, `append_note`, `search_notes`, `get_frontmatter`, `update_frontmatter`, `list_tags`, `list_backlinks`, and `append_daily_note`. Use `move_note` or `delete_note` only when explicitly requested.
 
 Read [note-templates.md](references/note-templates.md) when deciding where content belongs or when initializing a vault.
 

@@ -1,5 +1,32 @@
 # Project note templates
 
+## Codebase index templates
+
+Create `Codebase Index.md` only when bootstrapping a repository index:
+
+```yaml
+---
+roles:
+  repository_map: Codebase/Repository Map.md
+  ownership: Codebase/Ownership.md
+---
+```
+
+Use this frontmatter on each role note:
+
+```yaml
+---
+status: verified
+last_verified: 2026-08-28
+repository_revision: abc123
+owners:
+  - platform
+related_paths:
+  - src/server.ts
+  - tests/integration/server.integration.test.ts
+---
+```
+
 Use this frontmatter on project notes:
 
 ```yaml

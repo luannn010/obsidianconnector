@@ -23,7 +23,12 @@ New-Item -ItemType Directory -Force config | Out-Null
     "personal": {
       "path": "C:\\Users\\USERNAME\\Documents\\Obsidian\\Personal",
       "readOnly": false,
-      "dailyNotes": { "directory": "Daily", "dateFormat": "YYYY-MM-DD" }
+      "dailyNotes": { "directory": "Daily", "dateFormat": "YYYY-MM-DD" },
+      "codebaseIndex": {
+        "manifest": "Codebase Index.md",
+        "maxAgeDays": 30,
+        "roles": {}
+      }
     }
   }
 }
@@ -78,7 +83,7 @@ Start with: “List my registered Obsidian vaults.” Then choose a returned vau
 - `list_vaults`: “List every registered vault and show which are read-only.”
 - `get_vault`: “Show the configuration for the `personal` vault.”
 - `create_vault`: “Create and register a writable vault named `scratch` under the configured `G:\\My Drive\\.obsidian` parent directory.”
-- `register_vault`: “Register this existing vault as `work` in read-only mode.”
+- `register_vault`: “Register this existing vault as `work` in read-only mode, with optional `codebaseRoles` for non-standard project-note layouts.”
 - `unregister_vault`: “Unregister the `scratch` vault without deleting its files.”
 - `list_directory`: “List the Markdown notes and safe child directories in `personal/Projects`.”
 - `create_directory`: “Create the `Projects/2026` directory in the writable `personal` vault.”
@@ -95,8 +100,39 @@ Start with: “List my registered Obsidian vaults.” Then choose a returned vau
 - `list_tags`: “List tags used under `personal/Projects`.”
 - `list_backlinks`: “List notes linking to `personal/Projects/plan.md` with Obsidian wiki links.”
 - `append_daily_note`: “Append this entry to today's configured daily note in `personal`.”
-- `get_project_context`: “Read the canonical project notes from `personal` with bounded content and report missing notes.”
+- `get_project_context`: “Read the configured codebase index from `personal` with bounded content and report verification gaps.”
+- `verify_codebase_index`: “Verify the `personal` codebase index and show stale notes or missing evidence.”
 - `get_project_activity`: “Extract current tasks, decisions, risks, changelog entries, and recent daily notes from `personal`.”
+
+For a codebase index, create `Codebase Index.md` with frontmatter such as:
+
+```yaml
+---
+roles:
+  repository_map: Codebase/Repository Map.md
+  ownership: Codebase/Ownership.md
+  api_contracts: Codebase/API Contracts.md
+---
+```
+
+Each role note should use `status`, `last_verified`, `repository_revision`, `owners`, and `related_paths`. Obsidian is the navigation and planning source of truth; Git and repository tests remain authoritative for implementation behavior.
+
+Vaults with a different project-note layout can set `codebaseIndex.roles` in `config/vaults.json`, or pass `codebaseRoles` when registering/creating a vault. Configured roles take precedence over `Codebase Index.md` frontmatter, and both fall back to the legacy scaffold role names. `get_project_activity` reads `tasks`, `decisions`, `risks`, and `changelog` from those resolved role paths.
+
+```json
+{
+  "codebaseIndex": {
+    "manifest": "Codebase Index.md",
+    "maxAgeDays": 30,
+    "roles": {
+      "tasks": "04 - Plans & Specs/Tasks.md",
+      "decisions": "04 - Plans & Specs/Decisions.md",
+      "risks": "01 - Business Plan/Risks.md",
+      "changelog": "06 - Repository Reference/Changelog.md"
+    }
+  }
+}
+```
 
 ## Write safety
 

@@ -60,6 +60,7 @@ describe('MCP server integration', () => {
         'list_backlinks',
         'append_daily_note',
         'get_project_context',
+        'verify_codebase_index',
         'get_project_activity',
       ]),
     );

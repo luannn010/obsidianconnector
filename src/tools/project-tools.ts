@@ -11,7 +11,7 @@ export function registerProjectTools(
     'get_project_context',
     {
       description:
-        'Read the canonical project notes from a registered vault with bounded content and missing-note reporting.',
+        'Read the configured codebase index from a registered vault with bounded content, metadata, and verification-gap reporting.',
       inputSchema: {
         vault: z.string().min(1),
         maxChars: z.number().int().min(1000).max(100000).default(30000),
@@ -22,6 +22,25 @@ export function registerProjectTools(
       runTool(
         async () => context.project.getContext(vault, maxChars),
         (data) => `${data.notes.length} project note(s) inspected`,
+      ),
+  );
+
+  server.registerTool(
+    'verify_codebase_index',
+    {
+      description:
+        'Inspect codebase-index notes and report stale verification, missing notes, and missing evidence paths.',
+      inputSchema: {
+        vault: z.string().min(1),
+        maxChars: z.number().int().min(1000).max(100000).default(30000),
+      },
+      annotations: readOnlyAnnotations,
+    },
+    async ({ vault, maxChars }) =>
+      runTool(
+        async () => context.project.getContext(vault, maxChars),
+        (data) =>
+          `${data.verificationGaps.length} codebase verification gap(s)`,
       ),
   );
 

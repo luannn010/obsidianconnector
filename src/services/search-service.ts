@@ -8,11 +8,27 @@ export interface SearchMatch {
   matches: string[];
 }
 
-function excerpt(content: string, query: string): string {
+function excerpt(content: string, terms: string[]): string {
   const normalized = content.replace(/\s+/gu, ' ').trim();
-  const index = normalized.toLowerCase().indexOf(query.toLowerCase());
+  const lowered = normalized.toLowerCase();
+  const firstMatch = terms
+    .map((term) => ({
+      term,
+      index: lowered.indexOf(term),
+    }))
+    .filter((match) => match.index >= 0)
+    .sort((a, b) => a.index - b.index)[0];
+  const index = firstMatch?.index ?? -1;
   if (index < 0) return normalized.slice(0, 180);
-  return normalized.slice(Math.max(0, index - 70), index + query.length + 110);
+  return normalized.slice(
+    Math.max(0, index - 70),
+    index + (firstMatch?.term.length ?? 0) + 110,
+  );
+}
+
+function includesAnyTerm(value: string, terms: string[]): boolean {
+  const lowered = value.toLowerCase();
+  return terms.some((term) => lowered.includes(term));
 }
 
 export class SearchService {
@@ -33,6 +49,7 @@ export class SearchService {
   ): Promise<SearchMatch[]> {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) return [];
+    const terms = normalizedQuery.split(/\s+/u).filter(Boolean);
     const boundedLimit = Math.max(1, Math.min(limit, 100));
     const matches: SearchMatch[] = [];
     for (const note of await this.files.listNotes(
@@ -44,17 +61,16 @@ export class SearchService {
       const frontmatterText = JSON.stringify(parsed.data);
       const haystack =
         `${note.path}\n${noteContent.content}\n${frontmatterText}`.toLowerCase();
-      if (!haystack.includes(normalizedQuery)) continue;
+      if (!terms.every((term) => haystack.includes(term))) continue;
       const matchTypes: string[] = [];
-      if (note.path.toLowerCase().includes(normalizedQuery))
-        matchTypes.push('filename');
-      if (noteContent.content.toLowerCase().includes(normalizedQuery))
+      if (includesAnyTerm(note.path, terms)) matchTypes.push('filename');
+      if (includesAnyTerm(noteContent.content, terms))
         matchTypes.push('content');
-      if (frontmatterText.toLowerCase().includes(normalizedQuery))
+      if (includesAnyTerm(frontmatterText, terms))
         matchTypes.push('frontmatter');
       matches.push({
         path: note.path,
-        excerpt: excerpt(noteContent.content, normalizedQuery),
+        excerpt: excerpt(noteContent.content, terms),
         matches: matchTypes,
       });
       if (matches.length >= boundedLimit) break;
