@@ -20,7 +20,7 @@ description: Use when retrieving, updating, or publishing project knowledge thro
 - Read returned records from MCP `structuredContent`; the text block is only a compact summary.
 - Carry `snapshotId` from the snapshot into search and expansion. Carry `dbRevision` into optimistic writes.
 - A writable canonical hit exposes `itemId`, `itemVersion`, and `stableKey`. Use `itemId` plus `itemVersion` for patch or append. A hit without them is source-derived evidence; create a canonical correction with its citation instead of guessing an item identity.
-- Pass expansion handles in the `refs` array. Expand no more than eight references and request only the needed view.
+- Pass expansion handles in the `refs` array and expand no more than eight references. Use `full` with the current connector; the other accepted view names currently return the same chunk rather than relation-specific projections.
 - Respect each response's complete `budget`, `warnings`, `omissions`, freshness, hashes, and continuation cursor.
 - If hybrid embeddings or reranking are unavailable, use the returned exact/BM25 results and report the degraded warning.
 
