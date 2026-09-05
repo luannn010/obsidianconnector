@@ -31,6 +31,8 @@ export interface WorkerProject {
   vaultPath: string;
 }
 
+const SOURCE_PARSER_REVISION = 'structural-v2';
+
 function dirtyPaths(status: string): string[] {
   return status
     .split(/\r?\n/u)
@@ -59,6 +61,28 @@ function deliveryStatus(value: unknown): string {
   if (status === 'blocked') return 'blocked';
   if (status === 'planned' || status === 'proposed') return 'planned';
   return 'needs_review';
+}
+
+export async function clearChangedSnapshotRows(
+  client: { query(sql: string, values?: unknown[]): Promise<unknown> },
+  snapshotId: string,
+  changedPaths: string[],
+): Promise<void> {
+  await client.query(
+    `DELETE FROM project_knowledge.code_symbols symbols
+     USING project_knowledge.code_files files
+     WHERE symbols.file_id=files.id AND files.snapshot_id=$1
+       AND files.repo_relative_path=ANY($2::text[])`,
+    [snapshotId, changedPaths],
+  );
+  await client.query(
+    "DELETE FROM project_knowledge.search_chunks WHERE snapshot_id=$1 AND metadata->>'path'=ANY($2::text[])",
+    [snapshotId, changedPaths],
+  );
+  await client.query(
+    'DELETE FROM project_knowledge.code_files WHERE snapshot_id=$1 AND repo_relative_path=ANY($2::text[])',
+    [snapshotId, changedPaths],
+  );
 }
 
 export class KnowledgeWorker {
@@ -125,16 +149,18 @@ export class KnowledgeWorker {
           head_commit: string;
           dirty_hash: string | null;
           dirty_paths: string[];
+          parser_revision: string;
         }>(
           `
-        SELECT id,head_commit,dirty_hash,dirty_paths FROM project_knowledge.source_snapshots
+        SELECT id,head_commit,dirty_hash,dirty_paths,parser_revision FROM project_knowledge.source_snapshots
         WHERE project_id=$1 AND worktree_id=$2 AND state='active' ORDER BY activated_at DESC LIMIT 1`,
           [projectRow.project_id, worktree.id],
         )
       ).rows[0];
       if (
         previous?.head_commit === fingerprint.head &&
-        previous.dirty_hash === fingerprint.dirtyHash
+        previous.dirty_hash === fingerprint.dirtyHash &&
+        previous.parser_revision === SOURCE_PARSER_REVISION
       ) {
         await client.query(
           'UPDATE project_knowledge.worktrees SET last_seen_at=now() WHERE id=$1',
@@ -147,14 +173,15 @@ export class KnowledgeWorker {
       const snapshot = (
         await client.query<{ id: string }>(
           `
-        INSERT INTO project_knowledge.source_snapshots(project_id,worktree_id,head_commit,dirty_hash,dirty_paths,state)
-        VALUES($1,$2,$3,$4,$5,'building') RETURNING id`,
+        INSERT INTO project_knowledge.source_snapshots(project_id,worktree_id,head_commit,dirty_hash,dirty_paths,state,parser_revision)
+        VALUES($1,$2,$3,$4,$5,'building',$6) RETURNING id`,
           [
             projectRow.project_id,
             worktree.id,
             fingerprint.head,
             fingerprint.dirtyHash,
             currentDirty,
+            SOURCE_PARSER_REVISION,
           ],
         )
       ).rows[0]!;
@@ -164,12 +191,18 @@ export class KnowledgeWorker {
         previousPath?: string;
       }>;
       if (previous) {
-        changes = await changedIndexableFiles(
-          fingerprint.root,
-          previous.head_commit,
-          fingerprint.head,
-          fingerprint.status,
-        );
+        changes =
+          previous.parser_revision === SOURCE_PARSER_REVISION
+            ? await changedIndexableFiles(
+                fingerprint.root,
+                previous.head_commit,
+                fingerprint.head,
+                fingerprint.status,
+              )
+            : (await listIndexableFiles(fingerprint.root)).map((file) => ({
+                status: 'A',
+                path: file,
+              }));
         for (const oldDirty of previous.dirty_paths ?? [])
           if (!changes.some((change) => change.path === oldDirty))
             changes.push({ status: 'M', path: oldDirty });
@@ -207,14 +240,7 @@ export class KnowledgeWorker {
         ),
       ];
       if (changedPaths.length) {
-        await client.query(
-          "DELETE FROM project_knowledge.search_chunks WHERE snapshot_id=$1 AND metadata->>'path'=ANY($2::text[])",
-          [snapshot.id, changedPaths],
-        );
-        await client.query(
-          'DELETE FROM project_knowledge.code_files WHERE snapshot_id=$1 AND repo_relative_path=ANY($2::text[])',
-          [snapshot.id, changedPaths],
-        );
+        await clearChangedSnapshotRows(client, snapshot.id, changedPaths);
       }
       let indexedFiles = 0;
       for (const change of changes) {
@@ -302,6 +328,110 @@ export class KnowledgeWorker {
         }
         indexedFiles++;
       }
+      if (previous) {
+        await client.query(
+          `INSERT INTO project_knowledge.documentation_freshness
+           (project_id,item_id,knowledge_version_id,worktree_id,snapshot_id,state,reason,checked_at)
+           SELECT df.project_id,df.item_id,df.knowledge_version_id,df.worktree_id,$3,df.state,
+             'Unchanged source locators inherited from previous snapshot',now()
+           FROM project_knowledge.documentation_freshness df
+           JOIN project_knowledge.knowledge_items i ON i.id=df.item_id
+           JOIN project_knowledge.knowledge_versions v ON v.id=df.knowledge_version_id
+             AND v.version=i.current_version
+           WHERE df.project_id=$1 AND df.worktree_id=$2 AND df.snapshot_id=$4
+             AND NOT EXISTS (
+               SELECT 1 FROM project_knowledge.source_evidence e
+               WHERE e.item_id=df.item_id AND e.knowledge_version_id=df.knowledge_version_id
+                 AND e.source_path=ANY($5::text[])
+             )
+           ON CONFLICT(item_id,knowledge_version_id,worktree_id,snapshot_id) DO NOTHING`,
+          [
+            projectRow.project_id,
+            worktree.id,
+            snapshot.id,
+            previous.id,
+            changedPaths,
+          ],
+        );
+      }
+      await client.query(
+        `WITH target_evidence AS (
+           SELECT e.* FROM project_knowledge.source_evidence e
+           JOIN project_knowledge.knowledge_items i ON i.id=e.item_id
+           JOIN project_knowledge.knowledge_versions v ON v.id=e.knowledge_version_id
+             AND v.version=i.current_version
+           WHERE e.project_id=$1 AND e.knowledge_version_id IS NOT NULL
+             AND ($5::boolean OR e.source_path=ANY($4::text[]))
+         ), evaluated AS (
+           SELECT e.item_id,e.knowledge_version_id,
+             CASE WHEN current_chunk.content_hash IS NULL THEN 'missing'
+                  WHEN current_chunk.content_hash=e.source_hash THEN 'current'
+                  ELSE 'stale' END AS evidence_state
+           FROM target_evidence e
+           LEFT JOIN LATERAL (
+             SELECT CASE WHEN e.locator_type IN ('path','migration','test') THEN source_file.source_hash
+                    ELSE c.content_hash END AS content_hash
+             FROM project_knowledge.code_files source_file
+             LEFT JOIN project_knowledge.search_chunks c
+               ON c.snapshot_id=source_file.snapshot_id
+               AND c.metadata->>'path'=source_file.repo_relative_path
+             WHERE source_file.snapshot_id=$3 AND source_file.repo_relative_path=e.source_path
+               AND (e.locator_type IN ('path','migration','test') OR
+                 CASE e.locator_type
+                   WHEN 'symbol' THEN c.metadata->>'symbol'
+                   WHEN 'endpoint' THEN c.metadata->>'endpoint'
+                   WHEN 'table' THEN c.metadata->>'schema_table'
+                   ELSE NULL
+                 END=e.source_ref)
+             ORDER BY (CASE WHEN e.locator_type IN ('path','migration','test') THEN source_file.source_hash
+                       ELSE c.content_hash END=e.source_hash) DESC,c.id LIMIT 1
+           ) current_chunk ON true
+         ), reduced AS (
+           SELECT item_id,knowledge_version_id,
+             CASE WHEN bool_or(evidence_state='missing') THEN 'missing'
+                  WHEN bool_or(evidence_state='stale') THEN 'stale'
+                  ELSE 'current' END AS state
+           FROM evaluated GROUP BY item_id,knowledge_version_id
+         )
+         INSERT INTO project_knowledge.documentation_freshness
+           (project_id,item_id,knowledge_version_id,worktree_id,snapshot_id,state,reason)
+         SELECT $1,item_id,knowledge_version_id,$2,$3,state,
+           CASE state WHEN 'current' THEN 'All evidence hashes match'
+             WHEN 'missing' THEN 'One or more source locators are missing'
+             ELSE 'One or more source locator hashes changed' END
+         FROM reduced
+         ON CONFLICT(item_id,knowledge_version_id,worktree_id,snapshot_id) DO UPDATE SET
+           state=EXCLUDED.state,reason=EXCLUDED.reason,checked_at=now()`,
+        [
+          projectRow.project_id,
+          worktree.id,
+          snapshot.id,
+          changedPaths,
+          !previous,
+        ],
+      );
+      await client.query(
+        `INSERT INTO project_knowledge.documentation_freshness
+         (project_id,item_id,knowledge_version_id,worktree_id,snapshot_id,state,reason)
+         SELECT i.project_id,i.id,v.id,$2,$3,'unverified','Current knowledge version has no source evidence'
+         FROM project_knowledge.knowledge_items i
+         JOIN project_knowledge.knowledge_versions v ON v.item_id=i.id AND v.version=i.current_version
+         WHERE i.project_id=$1 AND i.superseded_by IS NULL
+           AND NOT EXISTS (SELECT 1 FROM project_knowledge.source_evidence e WHERE e.knowledge_version_id=v.id)
+         ON CONFLICT(item_id,knowledge_version_id,worktree_id,snapshot_id) DO UPDATE SET
+           state='unverified',reason=EXCLUDED.reason,checked_at=now()`,
+        [projectRow.project_id, worktree.id, snapshot.id],
+      );
+      if (changedPaths.length)
+        await client.query(
+          `UPDATE project_knowledge.task_file_rollups rollup SET
+             final_source_hash=files.source_hash
+           FROM project_knowledge.code_files files
+           WHERE rollup.project_id=$1 AND rollup.worktree_id=$2
+             AND files.snapshot_id=$3 AND files.repo_relative_path=rollup.repo_relative_path
+             AND rollup.repo_relative_path=ANY($4::text[])`,
+          [projectRow.project_id, worktree.id, snapshot.id, changedPaths],
+        );
       await client.query(
         `UPDATE project_knowledge.source_snapshots SET state='superseded'
         WHERE project_id=$1 AND worktree_id=$2 AND state='active'`,
@@ -460,10 +590,7 @@ export class KnowledgeWorker {
               .replace(/^\d{4}-\d{2}-\d{2}-/u, '')
               .replaceAll('-', ' ');
       const status = deliveryStatus(note.frontmatter.status);
-      const verification =
-        String(note.frontmatter.status ?? '').toLowerCase() === 'verified'
-          ? 'source_verified'
-          : 'unverified';
+      const verification = 'unverified';
       const stableKey = `legacy-work:${note.originalPath}`;
       const body = `Source: \`${note.originalPath}\`\n\n${
         note.bodyMarkdown
@@ -563,8 +690,14 @@ export class KnowledgeWorker {
       },
     ];
     const projectRow = (
-      await this.pool.query<{ db_revision: number }>(
-        'SELECT db_revision FROM project_knowledge.projects WHERE project_key=$1',
+      await this.pool.query<{ db_revision: number; snapshot_id: string }>(
+        `SELECT p.db_revision,s.id AS snapshot_id
+         FROM project_knowledge.projects p
+         JOIN LATERAL (
+           SELECT id FROM project_knowledge.source_snapshots
+           WHERE project_id=p.project_id AND state='active'
+           ORDER BY activated_at DESC LIMIT 1
+         ) s ON true WHERE p.project_key=$1`,
         [project.projectKey],
       )
     ).rows[0];
@@ -586,9 +719,12 @@ export class KnowledgeWorker {
           id: string;
           current_version: number;
           canonical_hash: string;
+          has_evidence: boolean;
         }>(
           `
-        SELECT i.id,i.current_version,v.canonical_hash FROM project_knowledge.knowledge_items i
+        SELECT i.id,i.current_version,v.canonical_hash,
+          EXISTS(SELECT 1 FROM project_knowledge.source_evidence e WHERE e.knowledge_version_id=v.id) AS has_evidence
+        FROM project_knowledge.knowledge_items i
         JOIN project_knowledge.knowledge_versions v ON v.item_id=i.id AND v.version=i.current_version
         JOIN project_knowledge.projects p ON p.project_id=i.project_id
         WHERE p.project_key=$1 AND i.stable_key=$2`,
@@ -605,7 +741,17 @@ export class KnowledgeWorker {
         domain: null,
         service: null,
       });
-      if (existing?.canonical_hash === expected) continue;
+      if (existing?.canonical_hash === expected && existing.has_evidence)
+        continue;
+      const evidenceChunk = (
+        await this.pool.query<{ id: string }>(
+          `SELECT id FROM project_knowledge.search_chunks
+           WHERE snapshot_id=$1 AND active AND metadata->>'path'=$2
+           ORDER BY id LIMIT 1`,
+          [projectRow.snapshot_id, document.path],
+        )
+      ).rows[0];
+      if (!evidenceChunk) continue;
       const result = await store.writeProjectKnowledge({
         projectKey: project.projectKey,
         actor: 'knowledge-worker',
@@ -614,6 +760,15 @@ export class KnowledgeWorker {
           {
             operation: existing ? 'patch' : 'create',
             ...(existing ? { expectedVersion: existing.current_version } : {}),
+            evidence: [
+              {
+                snapshotId: projectRow.snapshot_id,
+                ref: `chunk:${evidenceChunk.id}`,
+                locatorType: 'path',
+                required: true,
+                verificationScope: 'required',
+              },
+            ],
             item: {
               ...(existing ? { id: existing.id } : {}),
               stableKey: document.stableKey,
@@ -1011,9 +1166,9 @@ export class KnowledgeWorker {
     if (!projectRow)
       throw new Error('Project must be reconciled before publishing');
     const activeSnapshot = (
-      await this.pool.query<{ head_commit: string }>(
+      await this.pool.query<{ id: string; head_commit: string }>(
         `
-      SELECT s.head_commit FROM project_knowledge.source_snapshots s
+      SELECT s.id,s.head_commit FROM project_knowledge.source_snapshots s
       WHERE s.project_id=$1 AND s.state='active' ORDER BY s.activated_at DESC LIMIT 1`,
         [projectRow.project_id],
       )
@@ -1206,6 +1361,141 @@ export class KnowledgeWorker {
       'SELECT relative_path,state,db_revision FROM project_knowledge.note_projections WHERE project_id=$1 ORDER BY relative_path',
       [projectRow.project_id],
     );
+    const freshnessRows = activeSnapshot
+      ? await this.pool.query<{ state: string; count: number }>(
+          `SELECT state,count(DISTINCT item_id)::int AS count
+           FROM project_knowledge.documentation_freshness freshness
+           JOIN project_knowledge.knowledge_items item ON item.id=freshness.item_id
+           WHERE freshness.project_id=$1 AND freshness.snapshot_id=$2
+             AND item.kind=ANY($3::text[])
+           GROUP BY state`,
+          [
+            projectRow.project_id,
+            activeSnapshot.id,
+            [
+              'architecture',
+              'architecture_boundary',
+              'system_design',
+              'service',
+              'api_reference',
+              'api_contract',
+              'database_reference',
+              'database_schema',
+              'database_dictionary',
+              'permission',
+              'permissions',
+              'runbook',
+              'operational_runbook',
+            ],
+          ],
+        )
+      : { rows: [] };
+    const freshnessCounts = new Map(
+      freshnessRows.rows.map((row) => [row.state, Number(row.count)]),
+    );
+    const taskRows = await this.pool.query<{
+      id: string;
+      agent: 'codex' | 'claude';
+      external_task_id: string;
+      task_name: string;
+      status: string;
+      worktree_path: string;
+      branch: string;
+      start_revision: string | null;
+      current_revision: string;
+      documentation_gate: string;
+      started_at: Date;
+      last_seen_at: Date;
+    }>(
+      `SELECT t.id,t.agent,t.external_task_id,t.task_name,t.status,
+         w.path AS worktree_path,w.branch,start_snapshot.head_commit AS start_revision,
+         w.head_commit AS current_revision,
+         CASE WHEN EXISTS (
+           SELECT 1 FROM project_knowledge.task_file_rollups rollup
+           JOIN project_knowledge.source_evidence evidence
+             ON evidence.project_id=rollup.project_id
+             AND evidence.source_path=rollup.repo_relative_path AND evidence.required
+           JOIN project_knowledge.source_snapshots active_snapshot
+             ON active_snapshot.worktree_id=rollup.worktree_id AND active_snapshot.state='active'
+           LEFT JOIN project_knowledge.documentation_freshness freshness
+             ON freshness.item_id=evidence.item_id
+             AND freshness.knowledge_version_id=evidence.knowledge_version_id
+             AND freshness.worktree_id=rollup.worktree_id
+             AND freshness.snapshot_id=active_snapshot.id
+           WHERE rollup.task_id=t.id AND rollup.changed_by_task
+             AND COALESCE(freshness.state,'unverified')<>'current'
+         ) THEN 'blocked' ELSE 'current' END AS documentation_gate,
+         t.started_at,t.last_seen_at
+       FROM project_knowledge.agent_tasks t
+       JOIN project_knowledge.worktrees w ON w.id=t.worktree_id
+       LEFT JOIN project_knowledge.source_snapshots start_snapshot ON start_snapshot.id=t.start_snapshot_id
+       WHERE t.project_id=$1 ORDER BY t.last_seen_at DESC LIMIT 25`,
+      [projectRow.project_id],
+    );
+    const taskIds = taskRows.rows.map((task) => task.id);
+    const taskFileRows = taskIds.length
+      ? await this.pool.query<{
+          task_id: string;
+          repo_relative_path: string;
+          actions: string[];
+          access_count: number;
+          first_access_at: Date;
+          last_access_at: Date;
+          changed_by_task: boolean;
+        }>(
+          `SELECT task_id,repo_relative_path,actions,access_count,first_access_at,last_access_at,changed_by_task
+           FROM (
+             SELECT rollup.*,row_number() OVER(PARTITION BY task_id ORDER BY last_access_at DESC) AS task_rank
+             FROM project_knowledge.task_file_rollups rollup WHERE task_id=ANY($1::uuid[])
+           ) ranked WHERE task_rank<=50 ORDER BY task_id,last_access_at DESC`,
+          [taskIds],
+        )
+      : { rows: [] };
+    const taskDocumentationRows = taskIds.length
+      ? await this.pool.query<{
+          task_id: string;
+          item_id: string;
+          title: string;
+          current_version: number;
+          state: string;
+        }>(
+          `SELECT DISTINCT task.id AS task_id,item.id AS item_id,item.title,item.current_version,
+             COALESCE(freshness.state,'unverified') AS state
+           FROM project_knowledge.agent_tasks task
+           JOIN project_knowledge.task_file_rollups rollup ON rollup.task_id=task.id AND rollup.changed_by_task
+           JOIN project_knowledge.source_evidence evidence
+             ON evidence.project_id=rollup.project_id AND evidence.source_path=rollup.repo_relative_path
+           JOIN project_knowledge.knowledge_items item ON item.id=evidence.item_id
+           LEFT JOIN LATERAL (
+             SELECT state FROM project_knowledge.documentation_freshness
+             WHERE item_id=evidence.item_id AND knowledge_version_id=evidence.knowledge_version_id
+               AND worktree_id=rollup.worktree_id
+             ORDER BY checked_at DESC LIMIT 1
+           ) freshness ON true
+           WHERE task.id=ANY($1::uuid[]) ORDER BY task.id,item.title`,
+          [taskIds],
+        )
+      : { rows: [] };
+    const taskEvidenceRows = taskIds.length
+      ? await this.pool.query<{
+          task_id: string;
+          locator_type: string;
+          source_path: string;
+          source_ref: string | null;
+          source_hash: string;
+        }>(
+          `SELECT task.id AS task_id,evidence.locator_type,evidence.source_path,
+             evidence.source_ref,evidence.source_hash
+           FROM project_knowledge.agent_tasks task
+           JOIN project_knowledge.knowledge_versions version
+             ON version.project_id=task.project_id AND version.task_id=task.external_task_id
+           JOIN project_knowledge.source_evidence evidence
+             ON evidence.knowledge_version_id=version.id
+           WHERE task.id=ANY($1::uuid[])
+           ORDER BY task.id,evidence.locator_type,evidence.source_path,evidence.source_ref`,
+          [taskIds],
+        )
+      : { rows: [] };
     const legacyCount = Number(
       (
         await this.pool.query<{ count: string }>(
@@ -1312,6 +1602,51 @@ export class KnowledgeWorker {
         state: row.state,
         revision: Number(row.db_revision),
       })),
+      documentationFreshness: {
+        current: freshnessCounts.get('current') ?? 0,
+        possiblyStale: freshnessCounts.get('possibly_stale') ?? 0,
+        stale: freshnessCounts.get('stale') ?? 0,
+        missing: freshnessCounts.get('missing') ?? 0,
+        unverified: freshnessCounts.get('unverified') ?? 0,
+      },
+      agentTasks: taskRows.rows.map((task) => ({
+        agent: task.agent,
+        taskId: task.external_task_id,
+        taskName: task.task_name,
+        status: task.status,
+        worktree: task.worktree_path,
+        branch: task.branch,
+        startRevision: task.start_revision ?? 'unindexed',
+        currentRevision: task.current_revision,
+        documentationGate: task.documentation_gate,
+        startedAt: task.started_at.toISOString(),
+        lastActivityAt: task.last_seen_at.toISOString(),
+        files: taskFileRows.rows
+          .filter((file) => file.task_id === task.id)
+          .map((file) => ({
+            path: file.repo_relative_path,
+            actions: file.actions,
+            accessCount: Number(file.access_count),
+            firstAccessAt: file.first_access_at.toISOString(),
+            lastAccessAt: file.last_access_at.toISOString(),
+            changed: file.changed_by_task,
+          })),
+        documentation: taskDocumentationRows.rows
+          .filter((item) => item.task_id === task.id)
+          .map((item) => ({
+            ref: `knowledge:${item.item_id}:v${item.current_version}`,
+            title: item.title,
+            state: item.state,
+          })),
+        verificationEvidence: taskEvidenceRows.rows
+          .filter((item) => item.task_id === task.id)
+          .map((item) => ({
+            locatorType: item.locator_type,
+            path: item.source_path,
+            ...(item.source_ref ? { sourceRef: item.source_ref } : {}),
+            sourceHash: item.source_hash,
+          })),
+      })),
       legacyCount,
       legacy: legacyRows.map((row) => ({
         id: row.id,
@@ -1405,7 +1740,7 @@ export class KnowledgeWorker {
         payload: { chunkId: string };
       }>(
         `UPDATE project_knowledge.outbox_jobs SET state='processing',locked_at=now(),attempts=attempts+1
-        WHERE id IN (SELECT id FROM project_knowledge.outbox_jobs WHERE state IN ('pending','failed') AND job_type='embed_chunk' AND available_at<=now()
+        WHERE id IN (SELECT id FROM project_knowledge.outbox_jobs WHERE (state IN ('pending','failed') OR (state='processing' AND locked_at<=now()-interval '5 minutes')) AND job_type='embed_chunk' AND available_at<=now()
         ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) RETURNING id,payload`,
         [limit],
       );

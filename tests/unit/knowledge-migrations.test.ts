@@ -26,6 +26,10 @@ describe('project knowledge migrations', () => {
       'note_projections',
       'outbox_jobs',
       'legacy_sources',
+      'agent_tasks',
+      'file_activity_events',
+      'task_file_rollups',
+      'documentation_freshness',
     ]) {
       expect(sql).toContain(`project_knowledge.${table}`);
     }
@@ -38,6 +42,14 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('source_snapshots_one_active_worktree');
     expect(sql).toContain('outbox_jobs_claimable');
     expect(sql).toContain('note_projections_output_path');
+    expect(sql).toContain('file_activity_events_dedupe');
+    expect(sql).toContain('documentation_freshness_lookup');
+    expect(sql).toContain('knowledge_version_id');
+    expect(sql).toContain('locator_type');
+    expect(sql).toContain('parser_revision');
+    expect(knowledgeMigrations.at(-1)?.id).toBe(
+      '0003_structural_source_hash_revision',
+    );
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);

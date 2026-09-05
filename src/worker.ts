@@ -9,6 +9,7 @@ import {
   type WorkerProject,
 } from './worker/knowledge-worker.js';
 import { drainQueueBatches } from './worker/drain-queue.js';
+import { acquireSingletonLock } from './worker/singleton-lock.js';
 
 loadDotEnv();
 const runtime = getRuntimeConfig({
@@ -36,6 +37,15 @@ const pool = new Pool({
   statement_timeout: runtime.statementTimeoutMs,
   application_name: 'obsidian-local-worker',
 });
+const singleton = await acquireSingletonLock(
+  pool,
+  'obsidian-local-project-knowledge-worker',
+);
+if (!singleton.acquired) {
+  console.error(JSON.stringify({ event: 'knowledge_worker_already_running' }));
+  await pool.end();
+  process.exit(0);
+}
 const embedder = runtime.embeddingBaseUrl
   ? new OpenAiCompatibleEmbeddingClient(
       runtime.embeddingBaseUrl,
@@ -95,6 +105,7 @@ async function synchronize(): Promise<void> {
 
 await synchronize();
 if (process.env.PROJECT_KNOWLEDGE_WORKER_ONCE === 'true') {
+  await singleton.release();
   await pool.end();
 } else {
   const watcher = watch(
@@ -124,6 +135,7 @@ if (process.env.PROJECT_KNOWLEDGE_WORKER_ONCE === 'true') {
     if (timer) clearTimeout(timer);
     await watcher.close();
     await running;
+    await singleton.release();
     await pool.end();
   };
   process.once('SIGINT', () => void stop());

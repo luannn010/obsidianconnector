@@ -39,4 +39,19 @@ describe('source parser', () => {
     );
     expect(units.filter((unit) => unit.symbol === 'text')).toHaveLength(1);
   });
+
+  it('keeps structural evidence current when an unrelated symbol changes', () => {
+    const before = parseSourceUnits(
+      'src/service.ts',
+      'export function stable() { return 1; }\nexport function changed() { return 1; }',
+    );
+    const after = parseSourceUnits(
+      'src/service.ts',
+      'export function stable() { return 1; }\nexport function changed() { return 2; }',
+    );
+    const hash = (units: typeof before, symbol: string) =>
+      units.find((unit) => unit.symbol === symbol)?.contentHash;
+    expect(hash(after, 'stable')).toBe(hash(before, 'stable'));
+    expect(hash(after, 'changed')).not.toBe(hash(before, 'changed'));
+  });
 });

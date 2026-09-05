@@ -260,4 +260,103 @@ CREATE TABLE IF NOT EXISTS project_knowledge.legacy_sources (
 );
 `,
   },
+  {
+    id: '0002_task_traceability_and_doc_freshness',
+    sql: String.raw`
+ALTER TABLE project_knowledge.source_evidence
+  ADD COLUMN IF NOT EXISTS knowledge_version_id uuid REFERENCES project_knowledge.knowledge_versions(id),
+  ADD COLUMN IF NOT EXISTS locator_type text NOT NULL DEFAULT 'path',
+  ADD COLUMN IF NOT EXISTS required boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS verification_scope text NOT NULL DEFAULT 'warning';
+
+CREATE INDEX IF NOT EXISTS source_evidence_version_locator
+  ON project_knowledge.source_evidence(project_id,item_id,knowledge_version_id,locator_type,source_path,source_ref);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.agent_tasks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
+  agent text NOT NULL CHECK (agent IN ('codex','claude')),
+  external_task_id text NOT NULL,
+  task_name text NOT NULL DEFAULT 'Untitled task',
+  worktree_id uuid REFERENCES project_knowledge.worktrees(id),
+  start_snapshot_id uuid REFERENCES project_knowledge.source_snapshots(id),
+  end_snapshot_id uuid REFERENCES project_knowledge.source_snapshots(id),
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','interrupted','failed')),
+  started_at timestamptz NOT NULL DEFAULT now(),
+  ended_at timestamptz,
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(project_id,agent,external_task_id)
+);
+CREATE INDEX IF NOT EXISTS agent_tasks_recent
+  ON project_knowledge.agent_tasks(project_id,last_seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.file_activity_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
+  task_id uuid NOT NULL REFERENCES project_knowledge.agent_tasks(id) ON DELETE CASCADE,
+  worktree_id uuid NOT NULL REFERENCES project_knowledge.worktrees(id),
+  snapshot_id uuid REFERENCES project_knowledge.source_snapshots(id),
+  event_key text NOT NULL,
+  turn_id text,
+  tool_call_id text,
+  repo_relative_path text NOT NULL,
+  action text NOT NULL CHECK (action IN ('read','search','create','edit','delete','open')),
+  source_hash text,
+  capture_method text NOT NULL,
+  confidence text NOT NULL CHECK (confidence IN ('high','medium','low')),
+  occurred_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS file_activity_events_dedupe
+  ON project_knowledge.file_activity_events(project_id,task_id,event_key,repo_relative_path,action);
+CREATE INDEX IF NOT EXISTS file_activity_events_recent
+  ON project_knowledge.file_activity_events(project_id,task_id,occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.task_file_rollups (
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
+  task_id uuid NOT NULL REFERENCES project_knowledge.agent_tasks(id) ON DELETE CASCADE,
+  worktree_id uuid NOT NULL REFERENCES project_knowledge.worktrees(id),
+  repo_relative_path text NOT NULL,
+  actions text[] NOT NULL DEFAULT '{}',
+  access_count bigint NOT NULL DEFAULT 0,
+  first_access_at timestamptz NOT NULL,
+  last_access_at timestamptz NOT NULL,
+  initial_source_hash text,
+  final_source_hash text,
+  changed_by_task boolean NOT NULL DEFAULT false,
+  PRIMARY KEY(task_id,repo_relative_path)
+);
+CREATE INDEX IF NOT EXISTS task_file_rollups_recent
+  ON project_knowledge.task_file_rollups(project_id,last_access_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.documentation_freshness (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
+  item_id uuid NOT NULL REFERENCES project_knowledge.knowledge_items(id) ON DELETE CASCADE,
+  knowledge_version_id uuid NOT NULL REFERENCES project_knowledge.knowledge_versions(id) ON DELETE CASCADE,
+  worktree_id uuid NOT NULL REFERENCES project_knowledge.worktrees(id),
+  snapshot_id uuid NOT NULL REFERENCES project_knowledge.source_snapshots(id) ON DELETE CASCADE,
+  state text NOT NULL CHECK (state IN ('current','possibly_stale','stale','missing','unverified')),
+  reason text,
+  checked_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(item_id,knowledge_version_id,worktree_id,snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS documentation_freshness_lookup
+  ON project_knowledge.documentation_freshness(project_id,worktree_id,snapshot_id,state,item_id);
+
+UPDATE project_knowledge.knowledge_items i
+SET verification_status='unverified',updated_at=now()
+WHERE i.verification_status <> 'unverified'
+  AND NOT EXISTS (
+    SELECT 1 FROM project_knowledge.source_evidence e
+    WHERE e.project_id=i.project_id AND e.item_id=i.id AND e.knowledge_version_id IS NOT NULL
+  );
+`,
+  },
+  {
+    id: '0003_structural_source_hash_revision',
+    sql: String.raw`
+ALTER TABLE project_knowledge.source_snapshots
+  ADD COLUMN IF NOT EXISTS parser_revision text NOT NULL DEFAULT 'legacy';
+`,
+  },
 ];

@@ -64,13 +64,18 @@ export function parseSourceUnits(
       });
     }
   }
-  for (const match of content.matchAll(
-    /(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)/gu,
-  )) {
+  const symbolMatches = [
+    ...content.matchAll(
+      /(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)/gu,
+    ),
+  ];
+  for (let index = 0; index < symbolMatches.length; index++) {
+    const match = symbolMatches[index]!;
     const symbol = match[1] ?? '';
     const start = match.index ?? 0;
+    const nextDeclaration = symbolMatches[index + 1]?.index ?? content.length;
     const snippet = content
-      .slice(start, Math.min(content.length, start + 1000))
+      .slice(start, Math.min(nextDeclaration, start + 4000))
       .trim();
     units.push({
       kind: 'symbol',

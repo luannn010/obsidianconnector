@@ -1,35 +1,62 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { getRuntimeConfig } from '../../src/knowledge/config.js';
-
-afterEach(() => {
-  for (const key of [
-    'OBSIDIAN_MCP_PROFILE',
-    'PROJECT_KNOWLEDGE_DATABASE_URL',
-    'PROJECT_KNOWLEDGE_DB_POOL_MAX',
-  ])
-    delete process.env[key];
-});
 
 describe('knowledge runtime configuration', () => {
   it('requires a database URL for the standard profile and bounds the pool', () => {
-    process.env.OBSIDIAN_MCP_PROFILE = 'standard';
-    expect(() => getRuntimeConfig()).toThrow('PROJECT_KNOWLEDGE_DATABASE_URL');
-    process.env.PROJECT_KNOWLEDGE_DATABASE_URL =
-      'postgresql://localhost/playnode';
-    process.env.PROJECT_KNOWLEDGE_DB_POOL_MAX = '99';
-    expect(getRuntimeConfig()).toMatchObject({
+    expect(() =>
+      getRuntimeConfig({ OBSIDIAN_MCP_PROFILE: 'standard' }),
+    ).toThrow('PROJECT_KNOWLEDGE_DATABASE_URL');
+    expect(
+      getRuntimeConfig({
+        OBSIDIAN_MCP_PROFILE: 'standard',
+        PROJECT_KNOWLEDGE_DATABASE_URL: 'postgresql://localhost/playnode',
+        PROJECT_KNOWLEDGE_DB_POOL_MAX: '99',
+      }),
+    ).toMatchObject({
       profile: 'standard',
       poolMax: 8,
     });
   });
 
   it('defaults to the admin profile for backward compatibility', () => {
-    expect(getRuntimeConfig()).toMatchObject({
+    expect(getRuntimeConfig({})).toMatchObject({
       profile: 'admin',
       poolMax: 4,
       embeddingModel: 'BAAI/bge-small-en-v1.5',
       embeddingDimensions: 384,
       rerankerModel: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
+      activityEnabled: false,
+      activityHost: '127.0.0.1',
+      activityPort: 8765,
+    });
+  });
+
+  it('requires authentication and loopback binding for activity capture', () => {
+    expect(() =>
+      getRuntimeConfig({
+        PROJECT_KNOWLEDGE_ACTIVITY_ENABLED: 'true',
+      }),
+    ).toThrow('PROJECT_KNOWLEDGE_ACTIVITY_TOKEN');
+
+    expect(() =>
+      getRuntimeConfig({
+        PROJECT_KNOWLEDGE_ACTIVITY_ENABLED: 'true',
+        PROJECT_KNOWLEDGE_ACTIVITY_TOKEN: 'activity-secret',
+        PROJECT_KNOWLEDGE_ACTIVITY_HOST: '0.0.0.0',
+      }),
+    ).toThrow('127.0.0.1');
+
+    expect(
+      getRuntimeConfig({
+        PROJECT_KNOWLEDGE_ACTIVITY_ENABLED: 'true',
+        PROJECT_KNOWLEDGE_ACTIVITY_TOKEN: 'activity-secret',
+        PROJECT_KNOWLEDGE_ACTIVITY_PORT: '99999',
+      }),
+    ).toMatchObject({
+      activityEnabled: true,
+      activityHost: '127.0.0.1',
+      activityPort: 65535,
+      activityToken: 'activity-secret',
     });
   });
 

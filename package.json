@@ -17,7 +17,9 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "knowledge:migrate": "tsx src/migrate.ts",
-    "knowledge:worker": "tsx src/worker.ts"
+    "knowledge:worker": "tsx src/worker.ts",
+    "knowledge:activity": "tsx src/activity-server.ts",
+    "knowledge:hook": "tsx src/activity-hook.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.5",

@@ -56,6 +56,52 @@ describe('v2 vault views', () => {
       decisions: [],
       projections: [],
       legacyCount: 101,
+      documentationFreshness: {
+        current: 3,
+        possiblyStale: 0,
+        stale: 1,
+        missing: 0,
+        unverified: 2,
+      },
+      agentTasks: [
+        {
+          agent: 'codex',
+          taskId: 'task-123456789',
+          taskName: 'Update observer grants',
+          status: 'active',
+          worktree: 'C:/repo/.worktrees/observer',
+          branch: 'ptolemy/observer',
+          startRevision: 'abc',
+          currentRevision: 'def',
+          documentationGate: 'stale',
+          startedAt: '2026-09-05T00:00:00.000Z',
+          lastActivityAt: '2026-09-05T00:05:00.000Z',
+          files: [
+            {
+              path: 'services/observer/server/database.js',
+              actions: ['read', 'edit'],
+              accessCount: 2,
+              firstAccessAt: '2026-09-05T00:01:00.000Z',
+              lastAccessAt: '2026-09-05T00:04:00.000Z',
+              changed: true,
+            },
+          ],
+          documentation: [
+            {
+              ref: 'knowledge:item-1:v2',
+              title: 'Observer database boundary',
+              state: 'stale',
+            },
+          ],
+          verificationEvidence: [
+            {
+              locatorType: 'test',
+              path: 'services/observer/tests/database.test.js',
+              sourceHash: 'test-hash',
+            },
+          ],
+        },
+      ],
     });
     expect(views.map((view) => view.relativePath)).toContain(
       'Published/00 - Project Dashboard.md',
@@ -64,6 +110,18 @@ describe('v2 vault views', () => {
     expect(api.body).toContain('POST `/api/servers`');
     expect(api.body).toContain('"name": "world"');
     expect(api.body).toContain('resource.allocate');
+    const activity = views.find(
+      (view) =>
+        view.relativePath === 'Published/02 - Delivery/02 - Task Activity.md',
+    )!;
+    expect(activity.body).toContain('Update observer grants');
+    expect(activity.body).toContain('task-123456789');
+    expect(activity.body).toContain('ptolemy/observer');
+    const task = views.find((view) => view.relativePath.includes('/Tasks/'))!;
+    expect(task.body).toContain('services/observer/server/database.js');
+    expect(task.body).toContain('Codex');
+    expect(task.body).toContain('knowledge:item-1:v2');
+    expect(task.body).toContain('services/observer/tests/database.test.js');
   });
 
   it('keeps long architecture documents out of the dashboard', () => {
@@ -81,6 +139,14 @@ describe('v2 vault views', () => {
       decisions: [],
       projections: [],
       legacyCount: 0,
+      documentationFreshness: {
+        current: 0,
+        possiblyStale: 0,
+        stale: 0,
+        missing: 0,
+        unverified: 0,
+      },
+      agentTasks: [],
     };
     const dashboard = buildProjectViews({
       ...base,

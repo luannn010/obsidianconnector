@@ -202,7 +202,22 @@ $env:RETRIEVAL_MODEL_BEARER_TOKEN='replace-with-a-long-random-token'
 docker compose -f services/retrieval-model/compose.yaml up -d --build
 ```
 
-Model requests are bounded to two concurrent executions and the container is limited to 4 GiB by default. Set `RETRIEVAL_MODEL_MAX_CONCURRENCY` to another value from 1 through 8 or `RETRIEVAL_MODEL_MEMORY_LIMIT` to another Compose memory value before startup. The unauthenticated health route exposes only model names, dimensions, concurrency, and authentication mode; embedding and `/v1/rerank` requests require Bearer authentication.
+Model requests are bounded to two concurrent executions and the container is limited to 4 GiB by default. Set `RETRIEVAL_MODEL_MAX_CONCURRENCY` to another value from 1 through 8 or `RETRIEVAL_MODEL_MEMORY_LIMIT` to another Compose memory value before startup. Health, embedding, and `/v1/rerank` requests require Bearer authentication; health output contains model metadata but no secrets.
+
+### Documentation freshness and Recent Agent Files
+
+Migration `0002_task_traceability_and_doc_freshness` records Codex and Claude tasks, file activity rollups, versioned source evidence, and documentation freshness per worktree snapshot. `.obsidian/workspace.json` remains unmanaged because `lastOpenFiles` is Obsidian UI history and has no reliable agent, task, or worktree identity.
+
+Build the connector and install the local runtime once:
+
+```powershell
+npm run build
+.\scripts\install-activity-runtime.ps1 -RepositoryPath $PWD -ProjectPath 'C:\path\to\MC-Platform'
+```
+
+The installer stores its token in the protected Codex project-knowledge environment file, merges project-local Codex and Claude hooks, and registers two sign-in tasks. `ObsidianProjectKnowledgeActivity` accepts authenticated metadata on `127.0.0.1:8765` and spools temporary database outages. `ObsidianProjectKnowledgeWorker` incrementally indexes changed files, recalculates evidence freshness, and regenerates task views under `Published/02 - Delivery/`. Successful hooks write no output into model context.
+
+Source-verified writes for API contracts, database documentation, architecture boundaries, permissions, and runbooks must include snapshot-bound evidence refs. A stale required record returns `DOCS_STALE` and prevents verified completion until an evidence-backed update makes it current. General and historical notes remain warnings.
 
 Generated pages live under `Published/` during dual-run validation. Human edits belong in `Inbox/`; a generated-page edit is preserved in `Inbox/Conflicts` and reported as projection drift. Managed hashes use canonical JSON SHA-256 for records and normalized UTF-8/LF Markdown SHA-256 excluding volatile managed frontmatter.
 

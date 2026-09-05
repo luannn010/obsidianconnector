@@ -74,6 +74,8 @@ function fakeStore(): KnowledgeStore {
       projections: [],
       queues: { pending: 0, failed: 0 },
       conflicts: [],
+      documentationFreshness: {},
+      tasks: [],
     }),
   };
 }

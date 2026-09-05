@@ -4,6 +4,7 @@ export type KnowledgeErrorCode =
   | 'VERSION_CONFLICT'
   | 'EMBEDDING_UNAVAILABLE'
   | 'PROJECTION_DRIFT'
+  | 'DOCS_STALE'
   | 'CURSOR_EXPIRED'
   | 'BUDGET_TOO_SMALL';
 

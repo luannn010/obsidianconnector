@@ -12,6 +12,11 @@ export interface RuntimeConfig {
   rerankerBaseUrl?: string;
   rerankerModel: string;
   rerankerToken?: string;
+  activityEnabled: boolean;
+  activityHost: '127.0.0.1';
+  activityPort: number;
+  activityToken?: string;
+  activitySpoolPath?: string;
 }
 
 function boundedInteger(
@@ -58,6 +63,17 @@ export function getRuntimeConfig(
     throw new Error(
       'PROJECT_KNOWLEDGE_RERANKER_TOKEN is required when the reranker is enabled',
     );
+  const activityEnabled = env.PROJECT_KNOWLEDGE_ACTIVITY_ENABLED === 'true';
+  const activityToken =
+    env.PROJECT_KNOWLEDGE_ACTIVITY_TOKEN?.trim() || undefined;
+  const requestedActivityHost =
+    env.PROJECT_KNOWLEDGE_ACTIVITY_HOST?.trim() || '127.0.0.1';
+  if (requestedActivityHost !== '127.0.0.1')
+    throw new Error('PROJECT_KNOWLEDGE_ACTIVITY_HOST must be 127.0.0.1');
+  if (activityEnabled && !activityToken)
+    throw new Error(
+      'PROJECT_KNOWLEDGE_ACTIVITY_TOKEN is required when activity capture is enabled',
+    );
   return {
     profile,
     databaseUrl,
@@ -86,5 +102,16 @@ export function getRuntimeConfig(
       env.PROJECT_KNOWLEDGE_RERANKER_MODEL?.trim() ||
       'cross-encoder/ms-marco-MiniLM-L-6-v2',
     rerankerToken,
+    activityEnabled,
+    activityHost: '127.0.0.1',
+    activityPort: boundedInteger(
+      env.PROJECT_KNOWLEDGE_ACTIVITY_PORT,
+      8765,
+      1024,
+      65_535,
+    ),
+    activityToken,
+    activitySpoolPath:
+      env.PROJECT_KNOWLEDGE_ACTIVITY_SPOOL?.trim() || undefined,
   };
 }

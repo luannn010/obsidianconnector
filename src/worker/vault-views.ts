@@ -74,6 +74,41 @@ export interface ProjectViewData {
   }>;
   decisions: Array<{ title: string; body: string; status?: string }>;
   projections: Array<{ path: string; state: string; revision: number }>;
+  documentationFreshness: {
+    current: number;
+    possiblyStale: number;
+    stale: number;
+    missing: number;
+    unverified: number;
+  };
+  agentTasks: Array<{
+    agent: 'codex' | 'claude';
+    taskId: string;
+    taskName: string;
+    status: string;
+    worktree: string;
+    branch: string;
+    startRevision: string;
+    currentRevision: string;
+    documentationGate: string;
+    startedAt: string;
+    lastActivityAt: string;
+    files: Array<{
+      path: string;
+      actions: string[];
+      accessCount: number;
+      firstAccessAt: string;
+      lastAccessAt: string;
+      changed: boolean;
+    }>;
+    documentation: Array<{ ref: string; title: string; state: string }>;
+    verificationEvidence: Array<{
+      locatorType: string;
+      path: string;
+      sourceRef?: string;
+      sourceHash: string;
+    }>;
+  }>;
   legacyCount: number;
   legacy?: Array<{ id: string; originalPath: string; rawHash: string }>;
 }
@@ -97,6 +132,14 @@ const architectureGlance = (body?: string) =>
         .find(Boolean)
         ?.slice(0, 600) ?? 'Architecture record pending.')
     : 'Architecture record pending.';
+const titleCaseAgent = (agent: 'codex' | 'claude') =>
+  agent === 'codex' ? 'Codex' : 'Claude';
+const taskSlug = (value: string) =>
+  safeName(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-|-$/gu, '')
+    .slice(0, 60) || 'task';
 
 function apiServiceViews(data: ProjectViewData): ProjectView[] {
   const services = [
@@ -209,7 +252,7 @@ export function buildProjectViews(data: ProjectViewData): ProjectView[] {
     items
       .map((item) => `- ${item.title} — ${item.verificationStatus}`)
       .join('\n') || '- None';
-  const dashboard = `# ${data.projectKey} Project Dashboard\n\n## Architecture at a glance\n\n${architectureGlance(data.architecture[0]?.body)}\n\nRead [[01 - Architecture/00 - Architecture Overview|Architecture Overview]] for detail.\n\n## Verified completed\n\n${list(verified)}\n\n## Reported completed\n\n${list(reported)}\n\n## Active work\n\n${list(active)}\n\n## Blockers\n\n${list(blockers)}\n\n## Freshness\n\n- Git: \`${data.gitRevision}\`\n- Knowledge revision: ${data.dbRevision}\n- Legacy notes accounted for: ${data.legacyCount}\n\n## Navigate\n\n- [[01 - Architecture/00 - Architecture Overview|Architecture]]\n- [[02 - Delivery/00 - Implementation Status|Delivery]]\n- [[03 - APIs/00 - API Index|APIs]]\n- [[04 - Data/00 - Database Map|Data]]\n- [[06 - Operations/00 - Sync Status|Sync]]`;
+  const dashboard = `# ${data.projectKey} Project Dashboard\n\n## Architecture at a glance\n\n${architectureGlance(data.architecture[0]?.body)}\n\nRead [[01 - Architecture/00 - Architecture Overview|Architecture Overview]] for detail.\n\n## Verified completed\n\n${list(verified)}\n\n## Reported completed\n\n${list(reported)}\n\n## Active work\n\n${list(active)}\n\n## Blockers\n\n${list(blockers)}\n\n## Freshness\n\n- Git: \`${data.gitRevision}\`\n- Knowledge revision: ${data.dbRevision}\n- Required documentation: ${data.documentationFreshness.stale} stale, ${data.documentationFreshness.missing} missing, ${data.documentationFreshness.unverified} unverified\n- Active agent tasks: ${data.agentTasks.filter((task) => task.status === 'active').length}\n- Legacy notes accounted for: ${data.legacyCount}\n\n## Navigate\n\n- [[01 - Architecture/00 - Architecture Overview|Architecture]]\n- [[02 - Delivery/00 - Implementation Status|Delivery]]\n- [[02 - Delivery/02 - Task Activity|Agent task activity]]\n- [[03 - APIs/00 - API Index|APIs]]\n- [[04 - Data/00 - Database Map|Data]]\n- [[06 - Operations/00 - Sync Status|Sync]]`;
   const views: ProjectView[] = [
     {
       viewId: 'dashboard',
@@ -258,6 +301,57 @@ export function buildProjectViews(data: ProjectViewData): ProjectView[] {
       body: `# Active Worktrees\n\n| Branch | HEAD | Dirty | Registered | Index |\n|---|---|---:|---:|---|\n${data.worktrees.map((item) => `| ${item.branch} | \`${item.head}\` | ${item.dirty} | ${item.registered} | ${item.freshness} |`).join('\n')}`,
     },
   ];
+  views.push({
+    viewId: 'task-activity',
+    viewType: 'task-activity',
+    relativePath: 'Published/02 - Delivery/02 - Task Activity.md',
+    body: `# Task Activity\n\n| Agent | Task | Task ID | Status | Worktree | Branch | Revisions | Documentation | Last activity |\n|---|---|---|---|---|---|---|---|---|\n${
+      data.agentTasks
+        .map(
+          (task) =>
+            `| ${titleCaseAgent(task.agent)} | [[Tasks/${task.startedAt.slice(0, 10)}-${task.agent}-${task.taskId.slice(0, 8)}-${taskSlug(task.taskName)}|${task.taskName}]] | \`${task.taskId}\` | ${task.status} | \`${task.worktree}\` | \`${task.branch}\` | \`${task.startRevision}\` → \`${task.currentRevision}\` | ${task.documentationGate} | ${task.lastActivityAt} |`,
+        )
+        .join('\n') || '| | No agent tasks recorded | | | | | | | |'
+    }`,
+  });
+  for (const task of data.agentTasks) {
+    views.push({
+      viewId: `agent-task:${task.agent}:${task.taskId}`,
+      viewType: 'agent-task',
+      relativePath: `Published/02 - Delivery/Tasks/${task.startedAt.slice(0, 10)}-${task.agent}-${task.taskId.slice(0, 8)}-${taskSlug(task.taskName)}.md`,
+      body: `# ${task.taskName}\n\n- Agent: ${titleCaseAgent(task.agent)}\n- Task ID: \`${task.taskId}\`\n- Status: ${task.status}\n- Worktree: \`${task.worktree}\`\n- Branch: \`${task.branch}\`\n- Starting revision: \`${task.startRevision}\`\n- Current revision: \`${task.currentRevision}\`\n- Documentation gate: ${task.documentationGate}\n- Started: ${task.startedAt}\n- Last activity: ${task.lastActivityAt}\n\n## Recent agent files\n\n| Path | Actions | Accesses | First | Last | Changed |\n|---|---|---:|---|---|---:|\n${
+        task.files
+          .map(
+            (file) =>
+              `| \`${file.path}\` | ${file.actions.join(', ')} | ${file.accessCount} | ${file.firstAccessAt} | ${file.lastAccessAt} | ${file.changed} |`,
+          )
+          .join('\n') || '| No files recorded | | | | | |'
+      }
+
+## Documentation records
+
+| Record | State |
+|---|---|
+${
+  task.documentation
+    .map((item) => `| \`${item.ref}\` ${item.title} | ${item.state} |`)
+    .join('\n') || '| No linked documentation records | |'
+}
+
+## Tests and verification evidence
+
+| Locator | Path | Reference | Hash |
+|---|---|---|---|
+${
+  task.verificationEvidence
+    .map(
+      (item) =>
+        `| ${item.locatorType} | \`${item.path}\` | \`${item.sourceRef ?? ''}\` | \`${item.sourceHash}\` |`,
+    )
+    .join('\n') || '| No evidence attached by this task | | | |'
+}`,
+    });
+  }
   views.push(...apiServiceViews(data));
   const domains = [
     ...new Set(data.sequences.map((flow) => flow.domain)),

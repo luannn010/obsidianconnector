@@ -15,7 +15,6 @@ export function registerKnowledgeTools(
   server.registerTool(
     'get_project_snapshot',
     {
-      description: 'Get project snapshot.',
       inputSchema: {
         projectKey,
         worktreePath: z.string(),
@@ -33,7 +32,6 @@ export function registerKnowledgeTools(
   server.registerTool(
     'search_project_context',
     {
-      description: 'Search project context.',
       inputSchema: {
         projectKey,
         snapshotId: z.string().uuid().optional(),
@@ -56,7 +54,6 @@ export function registerKnowledgeTools(
   server.registerTool(
     'expand_project_context',
     {
-      description: 'Expand returned refs.',
       inputSchema: {
         projectKey,
         snapshotId: z.string().uuid().optional(),
@@ -84,7 +81,6 @@ export function registerKnowledgeTools(
   server.registerTool(
     'write_project_knowledge',
     {
-      description: 'Write versioned knowledge.',
       inputSchema: {
         projectKey,
         actor: z.string(),
@@ -104,10 +100,10 @@ export function registerKnowledgeTools(
   server.registerTool(
     'get_project_sync_status',
     {
-      description: 'Read sync status.',
       inputSchema: {
         projectKey,
         worktreeIds: z.array(z.string().uuid()).max(20).optional(),
+        filters,
         changedOnly: z.boolean().default(true),
       },
     },

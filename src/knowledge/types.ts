@@ -18,12 +18,16 @@ export interface ContextHit {
   symbol?: string;
   heading?: string;
   lines?: { start: number; end: number };
+  documentationFreshness?:
+    'current' | 'possibly_stale' | 'stale' | 'missing' | 'unverified';
 }
 
 export interface ProjectSnapshotInput {
   projectKey: string;
   worktreePath: string;
   taskId?: string;
+  taskName?: string;
+  agent?: 'codex' | 'claude';
   maxTokens: number;
 }
 
@@ -40,6 +44,12 @@ export interface ProjectSnapshot {
   blockers: ContextHit[];
   constraints: ContextHit[];
   refs: string[];
+  task?: {
+    ref: string;
+    agent: 'codex' | 'claude';
+    taskId: string;
+    taskName: string;
+  };
   budget: {
     limit: number;
     used: number;
@@ -83,10 +93,18 @@ export interface ExpandProjectContextInput {
 }
 
 export type KnowledgeOperation = 'create' | 'patch' | 'append' | 'supersede';
+export interface KnowledgeEvidenceInput {
+  snapshotId: string;
+  ref: string;
+  locatorType?: 'path' | 'symbol' | 'endpoint' | 'table' | 'migration' | 'test';
+  required?: boolean;
+  verificationScope?: 'required' | 'warning';
+}
 export interface KnowledgeChange {
   operation: KnowledgeOperation;
   expectedVersion?: number;
   supersedesId?: string;
+  evidence?: KnowledgeEvidenceInput[];
   item: {
     id?: string;
     stableKey?: string;
@@ -125,6 +143,7 @@ export interface KnowledgeWriteResult {
 export interface SyncStatusInput {
   projectKey: string;
   worktreeIds?: string[];
+  filters?: Record<string, string[]>;
   changedOnly: boolean;
 }
 
@@ -136,6 +155,8 @@ export interface ProjectSyncStatus {
   projections: unknown[];
   queues: { pending: number; failed: number };
   conflicts: unknown[];
+  documentationFreshness: Record<string, number>;
+  tasks: unknown[];
 }
 
 export interface KnowledgeStore {
