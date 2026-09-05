@@ -10,7 +10,7 @@ description: Use when retrieving, updating, or publishing project knowledge thro
 - Git, tests, migrations, and configuration are authoritative for executable behavior.
 - PostgreSQL `project_knowledge` is authoritative for normalized knowledge, history, delivery, contracts, mappings, and projections.
 - Search indexes are rebuildable. Obsidian `Published/` is a generated human view; `Inbox/` is its editable intake boundary.
-- At task startup call `get_project_snapshot` with the exact current worktree path, client task ID, agent, and concise task name. Keep its immutable snapshot ID and returned task reference for later calls.
+- At task startup call `get_project_snapshot` with the exact current worktree path and client task ID. Codex and Claude lifecycle hooks supply the agent and concise task name separately; do not send unsupported `agent` or `taskName` fields to the compact MCP tool. Keep its immutable snapshot ID and returned task reference for later calls.
 - Use `search_project_context` to discover context. Exact paths, symbols, routes, tables, IDs, and worktree names use `auto` or `exact`; conceptual questions use `hybrid`.
 - Use `expand_project_context` only for returned references that are needed. Do not recursively scan the repository or vault for routine context.
 - Open the exact source file before editing executable code when freshness matters.

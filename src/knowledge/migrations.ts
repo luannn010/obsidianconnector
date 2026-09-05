@@ -359,4 +359,25 @@ ALTER TABLE project_knowledge.source_snapshots
   ADD COLUMN IF NOT EXISTS parser_revision text NOT NULL DEFAULT 'legacy';
 `,
   },
+  {
+    id: '0004_projection_conflict_deduplication',
+    sql: String.raw`
+WITH ranked AS (
+  SELECT id,row_number() OVER (
+    PARTITION BY projection_id,expected_hash,observed_hash
+    ORDER BY created_at,id
+  ) AS duplicate_rank
+  FROM project_knowledge.projection_conflicts
+  WHERE resolved_at IS NULL
+)
+UPDATE project_knowledge.projection_conflicts conflict
+SET resolved_at=now()
+FROM ranked
+WHERE ranked.id=conflict.id AND ranked.duplicate_rank>1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS projection_conflicts_one_unresolved_drift
+  ON project_knowledge.projection_conflicts(projection_id,expected_hash,observed_hash)
+  WHERE resolved_at IS NULL;
+`,
+  },
 ];

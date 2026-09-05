@@ -1661,8 +1661,18 @@ export class KnowledgeWorker {
         await this.pool.query<{
           id: string;
           last_published_hash: string | null;
+          state: string;
+          observed_hash: string | null;
+          projection_hash: string;
+          preserved_path: string | null;
         }>(
-          'SELECT id,last_published_hash FROM project_knowledge.note_projections WHERE project_id=$1 AND view_id=$2',
+          `SELECT projection.id,projection.last_published_hash,projection.state,
+             projection.observed_hash,projection.projection_hash,
+             (SELECT conflict.preserved_path FROM project_knowledge.projection_conflicts conflict
+              WHERE conflict.projection_id=projection.id AND conflict.resolved_at IS NULL
+              ORDER BY conflict.created_at DESC LIMIT 1) AS preserved_path
+           FROM project_knowledge.note_projections projection
+           WHERE projection.project_id=$1 AND projection.view_id=$2`,
           [projectRow.project_id, view.viewId],
         )
       ).rows[0];
@@ -1677,13 +1687,22 @@ export class KnowledgeWorker {
               gitRevision: activeSnapshot?.head_commit,
               body: view.body,
             });
+      const desiredHash = projectionHash(rendered);
       const result = await publishProjection(
         project.vaultPath,
         view.relativePath,
         rendered,
         existing?.last_published_hash ?? undefined,
+        existing?.state === 'drifted' &&
+          existing.observed_hash &&
+          existing.preserved_path
+          ? {
+              desiredHash: existing.projection_hash,
+              observedHash: existing.observed_hash,
+              preservedPath: existing.preserved_path,
+            }
+          : undefined,
       );
-      const desiredHash = projectionHash(rendered);
       const projection = (
         await this.pool.query<{ id: string }>(
           `INSERT INTO project_knowledge.note_projections
@@ -1709,18 +1728,27 @@ export class KnowledgeWorker {
       ).rows[0]!;
       if (result.state === 'drifted') {
         drifted++;
+        if (result.conflictCreated)
+          await this.pool.query(
+            `INSERT INTO project_knowledge.projection_conflicts
+          (project_id,projection_id,expected_hash,observed_hash,preserved_path)
+          VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+            [
+              projectRow.project_id,
+              projection.id,
+              desiredHash,
+              result.observedHash,
+              result.preservedPath,
+            ],
+          );
+      } else {
+        current++;
         await this.pool.query(
-          `INSERT INTO project_knowledge.projection_conflicts
-          (project_id,projection_id,expected_hash,observed_hash,preserved_path) VALUES($1,$2,$3,$4,$5)`,
-          [
-            projectRow.project_id,
-            projection.id,
-            desiredHash,
-            result.observedHash,
-            result.preservedPath,
-          ],
+          `UPDATE project_knowledge.projection_conflicts SET resolved_at=now()
+           WHERE projection_id=$1 AND resolved_at IS NULL`,
+          [projection.id],
         );
-      } else current++;
+      }
     }
     await this.pool.query(
       `UPDATE project_knowledge.outbox_jobs SET state='done',last_error=NULL

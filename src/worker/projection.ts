@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import matter from 'gray-matter';
 import { stringify } from 'yaml';
 import { projectionHash } from '../knowledge/hash.js';
 
@@ -44,15 +45,36 @@ function safeTarget(root: string, relativePath: string): string {
   return target;
 }
 
+function isIntactManagedProjection(
+  markdown: string,
+  currentHash: string,
+): boolean {
+  try {
+    const frontmatter = matter(markdown).data;
+    return (
+      frontmatter.managed === true &&
+      frontmatter.projection_hash === currentHash
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function publishProjection(
   vaultRoot: string,
   relativePath: string,
   rendered: string,
   lastPublishedHash?: string,
+  knownDrift?: {
+    desiredHash: string;
+    observedHash: string;
+    preservedPath: string;
+  },
 ): Promise<{
   state: 'current' | 'drifted';
   observedHash: string;
   preservedPath?: string;
+  conflictCreated?: boolean;
 }> {
   const target = safeTarget(vaultRoot, relativePath);
   const current = await readFile(target, 'utf8').catch(
@@ -68,21 +90,34 @@ export async function publishProjection(
       currentHash !== lastPublishedHash &&
       currentHash !== projectionHash(rendered)
     ) {
-      const conflict = safeTarget(
-        vaultRoot,
-        path.join(
-          'Inbox',
-          'Conflicts',
-          `${Date.now()}-${path.basename(relativePath)}`,
-        ),
-      );
-      await mkdir(path.dirname(conflict), { recursive: true });
-      await writeFile(conflict, current, 'utf8');
-      return {
-        state: 'drifted',
-        observedHash: currentHash,
-        preservedPath: conflict,
-      };
+      if (!isIntactManagedProjection(current, currentHash)) {
+        if (
+          knownDrift?.observedHash === currentHash &&
+          knownDrift.desiredHash === projectionHash(rendered)
+        )
+          return {
+            state: 'drifted',
+            observedHash: currentHash,
+            preservedPath: knownDrift.preservedPath,
+            conflictCreated: false,
+          };
+        const conflict = safeTarget(
+          vaultRoot,
+          path.join(
+            'Inbox',
+            'Conflicts',
+            `${Date.now()}-${path.basename(relativePath)}`,
+          ),
+        );
+        await mkdir(path.dirname(conflict), { recursive: true });
+        await writeFile(conflict, current, 'utf8');
+        return {
+          state: 'drifted',
+          observedHash: currentHash,
+          preservedPath: conflict,
+          conflictCreated: true,
+        };
+      }
     }
     if (currentHash === projectionHash(rendered))
       return { state: 'current', observedHash: currentHash };

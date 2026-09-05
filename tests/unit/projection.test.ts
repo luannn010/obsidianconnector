@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -35,15 +35,60 @@ describe('managed Obsidian projections', () => {
     expect(first.state).toBe('current');
     expect(first.observedHash).toBe(projectionHash(rendered));
     const target = path.join(root, 'Published', '00 - Project Dashboard.md');
+
+    const nextRendered = renderManagedNote({
+      viewId: 'dashboard',
+      projectId: 'p1',
+      viewType: 'dashboard',
+      dbRevision: 3,
+      gitRevision: 'def',
+      body: '# Dashboard\nUpdated',
+    });
+    const recovered = await publishProjection(
+      root,
+      'Published/00 - Project Dashboard.md',
+      nextRendered,
+      'stale-database-hash',
+      {
+        desiredHash: projectionHash(nextRendered),
+        observedHash: first.observedHash,
+        preservedPath: 'previous-conflict.md',
+      },
+    );
+    expect(recovered.state).toBe('current');
+    expect(await readFile(target, 'utf8')).toContain('Updated');
+
     await writeFile(target, `${await readFile(target, 'utf8')}\nmanual`);
     const second = await publishProjection(
       root,
       'Published/00 - Project Dashboard.md',
-      rendered,
-      first.observedHash,
+      nextRendered,
+      recovered.observedHash,
     );
     expect(second.state).toBe('drifted');
+    expect(second.conflictCreated).toBe(true);
     expect(await readFile(target, 'utf8')).toContain('manual');
     expect(await readFile(second.preservedPath!, 'utf8')).toContain('manual');
+
+    const repeated = await publishProjection(
+      root,
+      'Published/00 - Project Dashboard.md',
+      nextRendered,
+      recovered.observedHash,
+      {
+        desiredHash: projectionHash(nextRendered),
+        observedHash: second.observedHash,
+        preservedPath: second.preservedPath!,
+      },
+    );
+    expect(repeated).toEqual({
+      state: 'drifted',
+      observedHash: second.observedHash,
+      preservedPath: second.preservedPath,
+      conflictCreated: false,
+    });
+    expect(await readdir(path.join(root, 'Inbox', 'Conflicts'))).toHaveLength(
+      1,
+    );
   });
 });

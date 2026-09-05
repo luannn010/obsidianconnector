@@ -44,11 +44,12 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('note_projections_output_path');
     expect(sql).toContain('file_activity_events_dedupe');
     expect(sql).toContain('documentation_freshness_lookup');
+    expect(sql).toContain('projection_conflicts_one_unresolved_drift');
     expect(sql).toContain('knowledge_version_id');
     expect(sql).toContain('locator_type');
     expect(sql).toContain('parser_revision');
     expect(knowledgeMigrations.at(-1)?.id).toBe(
-      '0003_structural_source_hash_revision',
+      '0004_projection_conflict_deduplication',
     );
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
