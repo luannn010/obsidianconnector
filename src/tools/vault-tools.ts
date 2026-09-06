@@ -48,6 +48,7 @@ export function registerVaultTools(
     readOnly: z.boolean().optional(),
     dailyDirectory: z.string().min(1).optional(),
     dateFormat: z.string().min(1).optional(),
+    codebaseRoles: z.record(z.string().min(1), z.string().min(1)).optional(),
   };
   server.registerTool(
     'register_vault',
@@ -56,7 +57,14 @@ export function registerVaultTools(
       inputSchema: registrationSchema,
       annotations: closedWorldAnnotations,
     },
-    async ({ name, path, readOnly, dailyDirectory, dateFormat }) =>
+    async ({
+      name,
+      path,
+      readOnly,
+      dailyDirectory,
+      dateFormat,
+      codebaseRoles,
+    }) =>
       runTool(
         async () => ({
           vault: await context.registry.register(
@@ -64,6 +72,7 @@ export function registerVaultTools(
             path,
             readOnly ?? false,
             { directory: dailyDirectory, dateFormat },
+            { roles: codebaseRoles },
           ),
         }),
         () => `Registered vault ${name}`,
@@ -73,17 +82,31 @@ export function registerVaultTools(
   server.registerTool(
     'create_vault',
     {
-      description: 'Create a new local vault directory and register it.',
-      inputSchema: registrationSchema,
+      description:
+        'Create and register a new vault under the configured Obsidian vault parent directory.',
+      inputSchema: {
+        name: vaultName,
+        readOnly: z.boolean().optional(),
+        dailyDirectory: z.string().min(1).optional(),
+        dateFormat: z.string().min(1).optional(),
+        codebaseRoles: z
+          .record(z.string().min(1), z.string().min(1))
+          .optional(),
+      },
       annotations: closedWorldAnnotations,
     },
-    async ({ name, path, readOnly, dailyDirectory, dateFormat }) =>
+    async ({ name, readOnly, dailyDirectory, dateFormat, codebaseRoles }) =>
       runTool(
         async () => ({
-          vault: await context.registry.create(name, path, readOnly ?? false, {
-            directory: dailyDirectory,
-            dateFormat,
-          }),
+          vault: await context.registry.create(
+            name,
+            readOnly ?? false,
+            {
+              directory: dailyDirectory,
+              dateFormat,
+            },
+            { roles: codebaseRoles },
+          ),
         }),
         () => `Created vault ${name}`,
       ),

@@ -27,7 +27,7 @@ function isWithin(root: string, candidate: string): boolean {
   return normalized[0] !== '..';
 }
 
-function validateRelativePath(
+export function validateRelativePath(
   relativePath: string,
   options: ResolvePathOptions,
 ): string[] {

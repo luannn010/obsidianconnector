@@ -34,4 +34,22 @@ describe('search service', () => {
     expect(await service.search('notes', 'searchable', 1)).toHaveLength(1);
     expect(await service.search('notes', 'missing')).toEqual([]);
   });
+
+  it('matches all terms in a multi-term query across searchable fields', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'obsidian-mcp-search-'));
+    roots.push(root);
+    await writeFile(
+      path.join(root, 'wallet.md'),
+      '---\nstatus: PAYG\n---\nWallet balance and settlement notes.',
+    );
+    await writeFile(path.join(root, 'payg-only.md'), 'PAYG rollout notes.');
+    const registry = await VaultRegistry.load(path.join(root, 'config.json'));
+    await registry.register('notes', root);
+    const service = new SearchService(registry);
+
+    const results = await service.search('notes', 'PAYG wallet');
+
+    expect(results.map((match) => match.path)).toEqual(['wallet.md']);
+    expect(results[0]?.matches).toEqual(['filename', 'content', 'frontmatter']);
+  });
 });

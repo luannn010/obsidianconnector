@@ -2,7 +2,11 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { getConfigPath, VaultRegistry } from '../../src/config/registry.js';
+import {
+  getConfigPath,
+  loadDotEnv,
+  VaultRegistry,
+} from '../../src/config/registry.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -16,6 +20,7 @@ async function makeTempDirectory(): Promise<string> {
 
 afterEach(async () => {
   delete process.env.OBSIDIAN_MCP_CONFIG;
+  delete process.env.OBSIDIAN_VAULT_ROOT;
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -27,6 +32,10 @@ describe('configuration and vault registry', () => {
   it('uses the environment override and defaults to config/vaults.json', () => {
     expect(getConfigPath({ cwd: 'C:\\project' })).toBe(
       path.resolve('C:\\project', 'config', 'vaults.json'),
+    );
+    process.env.OBSIDIAN_MCP_CONFIG = 'config/vaults.json';
+    expect(getConfigPath({ cwd: 'C:\\connector' })).toBe(
+      path.resolve('C:\\connector', 'config', 'vaults.json'),
     );
     process.env.OBSIDIAN_MCP_CONFIG = 'C:\\custom\\vaults.json';
     expect(getConfigPath({ cwd: 'C:\\project' })).toBe(
@@ -51,7 +60,9 @@ describe('configuration and vault registry', () => {
       }),
     );
 
-    const registry = await VaultRegistry.load(configPath);
+    const registry = await VaultRegistry.load(configPath, {
+      vaultRoot: directory,
+    });
     expect(registry.list()).toEqual([
       expect.objectContaining({
         name: 'personal',
@@ -77,11 +88,20 @@ describe('configuration and vault registry', () => {
     const configPath = path.join(directory, 'vaults.json');
     const registry = await VaultRegistry.load(configPath);
 
-    await registry.register('notes', vault, true);
+    await registry.register('notes', vault, true, undefined, {
+      roles: { tasks: 'Plans/Tasks.md' },
+    });
     expect(registry.get('notes').readOnly).toBe(true);
+    expect(registry.get('notes').codebaseIndex.roles).toEqual({
+      tasks: 'Plans/Tasks.md',
+    });
     expect(
       JSON.parse(await readFile(configPath, 'utf8')).vaults.notes.path,
     ).toBe(path.resolve(vault));
+    expect(
+      JSON.parse(await readFile(configPath, 'utf8')).vaults.notes.codebaseIndex
+        .roles,
+    ).toEqual({ tasks: 'Plans/Tasks.md' });
 
     await registry.unregister('notes');
     expect(registry.list()).toEqual([]);
@@ -93,12 +113,91 @@ describe('configuration and vault registry', () => {
   it('creates and registers a vault directory', async () => {
     const directory = await makeTempDirectory();
     const configPath = path.join(directory, 'vaults.json');
-    const registry = await VaultRegistry.load(configPath);
+    const registry = await VaultRegistry.load(configPath, {
+      vaultRoot: directory,
+    });
     const vault = path.join(directory, 'created');
 
-    await registry.create('created', vault);
+    await registry.create('created');
 
     expect(registry.get('created').path).toBe(path.resolve(vault));
+  });
+
+  it('updates project roles and aliases without changing vault registration', async () => {
+    const directory = await makeTempDirectory();
+    const vault = path.join(directory, 'mapped');
+    await mkdir(vault);
+    const registry = await VaultRegistry.load(
+      path.join(directory, 'vaults.json'),
+    );
+    await registry.register('mapped', vault, true);
+
+    await registry.updateCodebaseIndex('mapped', {
+      roles: { 'planning.task_list': 'Planning/Tasks.md' },
+      aliases: { tasks: 'planning.task_list' },
+    });
+
+    expect(registry.get('mapped')).toMatchObject({
+      path: path.resolve(vault),
+      readOnly: true,
+      codebaseIndex: {
+        roles: { 'planning.task_list': 'Planning/Tasks.md' },
+        aliases: { tasks: 'planning.task_list' },
+      },
+    });
+    expect(
+      JSON.parse(await readFile(path.join(directory, 'vaults.json'), 'utf8'))
+        .vaults.mapped.codebaseIndex.aliases,
+    ).toEqual({ tasks: 'planning.task_list' });
+  });
+
+  it('lists only registered vaults beneath the configured vault root', async () => {
+    const directory = await makeTempDirectory();
+    const root = path.join(directory, 'obsidian');
+    const outside = path.join(directory, 'outside');
+    await mkdir(root);
+    await mkdir(path.join(root, 'inside'));
+    await mkdir(outside);
+    const registry = await VaultRegistry.load(
+      path.join(directory, 'vaults.json'),
+      { vaultRoot: root },
+    );
+
+    await registry.register('inside', path.join(root, 'inside'));
+    await registry.register('outside', outside);
+    expect(registry.list().map((vault) => vault.name)).toEqual(['inside']);
+  });
+
+  it('does not inspect configured vaults outside the focused vault root', async () => {
+    const directory = await makeTempDirectory();
+    const root = path.join(directory, 'obsidian');
+    const inside = path.join(root, 'inside');
+    const missingOutside = path.join(directory, 'missing-outside');
+    await mkdir(inside, { recursive: true });
+    const configPath = path.join(directory, 'vaults.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        vaults: {
+          inside: { path: inside },
+          external: { path: missingOutside },
+        },
+      }),
+    );
+
+    const registry = await VaultRegistry.load(configPath, { vaultRoot: root });
+
+    expect(registry.list().map((vault) => vault.name)).toEqual(['inside']);
+  });
+
+  it('loads vault root from a dotenv file without overriding existing variables', async () => {
+    const directory = await makeTempDirectory();
+    const envPath = path.join(directory, '.env');
+    await writeFile(envPath, 'OBSIDIAN_VAULT_ROOT="G:\\My Drive\\.obsidian"\n');
+
+    loadDotEnv(envPath);
+
+    expect(process.env.OBSIDIAN_VAULT_ROOT).toBe('G:\\My Drive\\.obsidian');
   });
 
   it('rejects invalid names and duplicate registrations', async () => {
