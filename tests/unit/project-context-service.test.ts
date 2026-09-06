@@ -72,6 +72,36 @@ async function makeRoleMappedService(): Promise<{
   };
 }
 
+async function makeAliasMappedService(): Promise<{
+  root: string;
+  service: ProjectContextService;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'obsidian-mcp-aliases-'));
+  roots.push(root);
+  const registry = await VaultRegistry.load(path.join(root, 'config.json'));
+  await registry.register('aliases', root, false, undefined, {
+    roles: {
+      'planning.task_list': 'Planning/Tasks.md',
+      'planning.decisions': 'Planning/Decisions.md',
+      'operations.risks': 'Operations/Risks.md',
+      'operations.changelog': 'Operations/Changelog.md',
+    },
+    aliases: {
+      tasks: 'planning.task_list',
+      decisions: 'planning.decisions',
+      risks: 'operations.risks',
+      changelog: 'operations.changelog',
+    },
+  });
+  return {
+    root,
+    service: new ProjectContextService(
+      registry,
+      new FilesystemService(registry),
+    ),
+  };
+}
+
 describe('project context service', () => {
   it('uses configured role paths before legacy defaults for context verification', async () => {
     const { root, service } = await makeRoleMappedService();
@@ -243,5 +273,37 @@ describe('project context service', () => {
       source: '06 - Repository Reference/Changelog.md',
       content: expect.stringContaining('Mapped project activity roles'),
     });
+  });
+
+  it('uses semantic aliases for custom role names', async () => {
+    const { root, service } = await makeAliasMappedService();
+    await mkdir(path.join(root, 'Planning'), { recursive: true });
+    await mkdir(path.join(root, 'Operations'), { recursive: true });
+    await writeFile(
+      path.join(root, 'Planning', 'Tasks.md'),
+      '- [ ] Use custom task path\n',
+    );
+    await writeFile(
+      path.join(root, 'Planning', 'Decisions.md'),
+      '## Custom Decision\n\nUse aliases.\n',
+    );
+    await writeFile(
+      path.join(root, 'Operations', 'Risks.md'),
+      '## Custom Risk\n\nKeep mappings portable.\n',
+    );
+    await writeFile(
+      path.join(root, 'Operations', 'Changelog.md'),
+      '## Custom Changelog\n\nAdded aliases.\n',
+    );
+
+    const activity = await service.getActivity('aliases', 5, 5000);
+
+    expect(activity.tasks[0]).toMatchObject({
+      source: 'Planning/Tasks.md',
+      text: 'Use custom task path',
+    });
+    expect(activity.decisions.at(0)?.source).toBe('Planning/Decisions.md');
+    expect(activity.risks.at(0)?.source).toBe('Operations/Risks.md');
+    expect(activity.changelog.at(0)?.source).toBe('Operations/Changelog.md');
   });
 });

@@ -8,6 +8,7 @@ export interface ToolContext {
   frontmatter: import('../services/frontmatter-service.js').FrontmatterService;
   dailyNotes: import('../services/daily-note-service.js').DailyNoteService;
   project: import('../services/project-context-service.js').ProjectContextService;
+  bootstrap: import('../services/project-bootstrap-service.js').ProjectBootstrapService;
 }
 
 export const closedWorldAnnotations = { openWorldHint: false } as const;

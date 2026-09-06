@@ -5,6 +5,8 @@ import { FilesystemService } from './services/filesystem-service.js';
 import { FrontmatterService } from './services/frontmatter-service.js';
 import { SearchService } from './services/search-service.js';
 import { ProjectContextService } from './services/project-context-service.js';
+import { ProjectBootstrapService } from './services/project-bootstrap-service.js';
+import { ProjectMappingService } from './services/project-mapping-service.js';
 import { registerDirectoryTools } from './tools/directory-tools.js';
 import { registerFileTools } from './tools/file-tools.js';
 import { registerObsidianTools } from './tools/obsidian-tools.js';
@@ -14,13 +16,15 @@ import type { ToolContext } from './tools/tool-utils.js';
 
 export function createServer(registry: VaultRegistry): McpServer {
   const files = new FilesystemService(registry);
+  const mapping = new ProjectMappingService(registry, files);
   const context: ToolContext = {
     registry,
     files,
     search: new SearchService(registry, files),
     frontmatter: new FrontmatterService(files),
     dailyNotes: new DailyNoteService(registry, files),
-    project: new ProjectContextService(registry, files),
+    project: new ProjectContextService(registry, files, mapping),
+    bootstrap: new ProjectBootstrapService(registry, mapping, files),
   };
   const server = new McpServer({
     name: 'ObsidianConnector',

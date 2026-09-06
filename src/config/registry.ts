@@ -197,6 +197,7 @@ export class VaultRegistry {
         manifest: codebaseIndex?.manifest?.trim() || 'Codebase Index.md',
         maxAgeDays: codebaseIndex?.maxAgeDays ?? 30,
         roles: { ...(codebaseIndex?.roles ?? {}) },
+        aliases: { ...(codebaseIndex?.aliases ?? {}) },
       },
     };
     this.vaults.set(normalizedName, vault);
@@ -220,6 +221,25 @@ export class VaultRegistry {
       dailyNotes,
       codebaseIndex,
     );
+  }
+
+  async updateCodebaseIndex(
+    name: string,
+    update: Partial<CodebaseIndexConfig>,
+  ): Promise<RegisteredVault> {
+    const current = this.vaults.get(name);
+    if (!current) throw new Error(`Vault is not registered: ${name}`);
+    this.vaults.set(name, {
+      ...current,
+      codebaseIndex: {
+        ...current.codebaseIndex,
+        ...update,
+        roles: { ...(update.roles ?? current.codebaseIndex.roles) },
+        aliases: { ...(update.aliases ?? current.codebaseIndex.aliases) },
+      },
+    });
+    await this.persist();
+    return this.get(name);
   }
 
   async unregister(name: string): Promise<void> {

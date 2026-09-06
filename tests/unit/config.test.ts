@@ -123,6 +123,34 @@ describe('configuration and vault registry', () => {
     expect(registry.get('created').path).toBe(path.resolve(vault));
   });
 
+  it('updates project roles and aliases without changing vault registration', async () => {
+    const directory = await makeTempDirectory();
+    const vault = path.join(directory, 'mapped');
+    await mkdir(vault);
+    const registry = await VaultRegistry.load(
+      path.join(directory, 'vaults.json'),
+    );
+    await registry.register('mapped', vault, true);
+
+    await registry.updateCodebaseIndex('mapped', {
+      roles: { 'planning.task_list': 'Planning/Tasks.md' },
+      aliases: { tasks: 'planning.task_list' },
+    });
+
+    expect(registry.get('mapped')).toMatchObject({
+      path: path.resolve(vault),
+      readOnly: true,
+      codebaseIndex: {
+        roles: { 'planning.task_list': 'Planning/Tasks.md' },
+        aliases: { tasks: 'planning.task_list' },
+      },
+    });
+    expect(
+      JSON.parse(await readFile(path.join(directory, 'vaults.json'), 'utf8'))
+        .vaults.mapped.codebaseIndex.aliases,
+    ).toEqual({ tasks: 'planning.task_list' });
+  });
+
   it('lists only registered vaults beneath the configured vault root', async () => {
     const directory = await makeTempDirectory();
     const root = path.join(directory, 'obsidian');

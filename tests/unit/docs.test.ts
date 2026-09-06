@@ -37,6 +37,10 @@ describe('README documentation', () => {
       'append_daily_note',
       'get_project_context',
       'get_project_activity',
+      'initialize_project',
+      'sync_project_config',
+      '.obsidian-local',
+      'mapping.yaml',
     ]) {
       expect(readme).toContain(phrase);
     }

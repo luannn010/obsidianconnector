@@ -1,23 +1,11 @@
 import type { VaultRegistry } from '../config/registry.js';
-import type { CodebaseIndexConfig } from '../config/schema.js';
 import { SecurityError } from '../security/path-security.js';
 import type { FilesystemService } from './filesystem-service.js';
+import {
+  ProjectMappingService,
+  resolveSemanticPath,
+} from './project-mapping-service.js';
 import matter from 'gray-matter';
-
-const legacyContextNotes = [
-  ['home', '00 - Project Home.md'],
-  ['brief', '01 - Brief.md'],
-  ['goals', '02 - Goals & Success Criteria.md'],
-  ['requirements', '03 - Requirements.md'],
-  ['decisions', '04 - Decisions.md'],
-  ['plans', '05 - Plans.md'],
-  ['tasks', '06 - Tasks.md'],
-  ['research', '07 - Research.md'],
-  ['meetings', '08 - Meeting Notes.md'],
-  ['resources', '09 - Resources.md'],
-  ['risks', '10 - Risks & Issues.md'],
-  ['changelog', '11 - Changelog.md'],
-] as const;
 
 export interface ProjectContextNote {
   role: string;
@@ -35,6 +23,7 @@ export interface ProjectContext {
   notes: ProjectContextNote[];
   missing: string[];
   indexManifest: Record<string, string>;
+  indexAliases: Record<string, string>;
   verificationGaps: Array<{ role: string; path: string; reason: string }>;
 }
 
@@ -95,70 +84,40 @@ function parseMetadata(content: string): Record<string, unknown> {
   return Object.fromEntries(Object.entries(parsed));
 }
 
-function roleMapFromMetadata(
-  metadata: Record<string, unknown>,
-): Record<string, string> {
-  if (
-    metadata.roles &&
-    typeof metadata.roles === 'object' &&
-    !Array.isArray(metadata.roles)
-  ) {
-    return Object.fromEntries(
-      Object.entries(metadata.roles).filter(
-        (entry): entry is [string, string] => typeof entry[1] === 'string',
-      ),
-    );
-  }
-  return {};
-}
-
 export class ProjectContextService {
+  private readonly mapping: ProjectMappingService;
+
   constructor(
     private readonly registry: VaultRegistry,
     private readonly files: FilesystemService,
-  ) {}
-
-  private async resolveIndexManifest(
-    vaultName: string,
-    config: CodebaseIndexConfig,
-    verificationGaps?: ProjectContext['verificationGaps'],
-  ): Promise<Record<string, string>> {
-    const configuredRoles = config.roles ?? {};
-    let manifestRoles: Record<string, string> = {};
-    try {
-      const manifest = await this.files.readNote(vaultName, config.manifest);
-      manifestRoles = roleMapFromMetadata(parseMetadata(manifest.content));
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      if (Object.keys(configuredRoles).length === 0) {
-        verificationGaps?.push({
-          role: 'manifest',
-          path: config.manifest,
-          reason: 'missing_manifest',
-        });
-      }
-    }
-    return {
-      ...Object.fromEntries(legacyContextNotes),
-      ...manifestRoles,
-      ...configuredRoles,
-    };
+    mapping?: ProjectMappingService,
+  ) {
+    this.mapping = mapping ?? new ProjectMappingService(registry, files);
   }
 
   async getContext(
     vaultName: string,
     maxChars = 30000,
   ): Promise<ProjectContext> {
-    const config = this.registry.get(vaultName).codebaseIndex;
+    const resolved = await this.mapping.resolveIndex(vaultName);
+    const indexManifest = resolved.roles;
     let remaining = Math.max(1000, Math.min(maxChars, 100000));
     const notes: ProjectContextNote[] = [];
     const missing: string[] = [];
     const verificationGaps: ProjectContext['verificationGaps'] = [];
-    const indexManifest = await this.resolveIndexManifest(
-      vaultName,
-      config,
-      verificationGaps,
-    );
+    const config = this.registry.get(vaultName).codebaseIndex;
+    try {
+      await this.files.readNote(vaultName, config.manifest);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      if (Object.keys(config.roles).length === 0) {
+        verificationGaps.push({
+          role: 'manifest',
+          path: config.manifest,
+          reason: 'missing_manifest',
+        });
+      }
+    }
     for (const [role, relativePath] of Object.entries(indexManifest)) {
       try {
         const note = await this.files.readNote(vaultName, relativePath);
@@ -211,6 +170,7 @@ export class ProjectContextService {
       notes,
       missing,
       indexManifest,
+      indexAliases: resolved.aliases,
       verificationGaps,
     };
   }
@@ -222,10 +182,9 @@ export class ProjectContextService {
   ): Promise<ProjectActivity> {
     const vault = this.registry.get(vaultName);
     const dailyDirectory = vault.dailyNotes.directory;
-    const indexManifest = await this.resolveIndexManifest(
-      vaultName,
-      vault.codebaseIndex,
-    );
+    const resolved = await this.mapping.resolveIndex(vaultName);
+    const indexManifest = resolved.roles;
+    const indexAliases = resolved.aliases;
     const activity: ProjectActivity = {
       vault: vaultName,
       tasks: [],
@@ -245,7 +204,12 @@ export class ProjectContextService {
       }
     };
 
-    const taskPath = indexManifest.tasks ?? '06 - Tasks.md';
+    const taskPath = resolveSemanticPath(
+      indexManifest,
+      indexAliases,
+      'tasks',
+      '06 - Tasks.md',
+    );
     const taskContent = await readOptional(taskPath);
     if (taskContent) {
       for (const match of taskContent.matchAll(
@@ -263,9 +227,33 @@ export class ProjectContextService {
     }
 
     for (const [key, target] of [
-      ['decisions', indexManifest.decisions ?? '04 - Decisions.md'],
-      ['risks', indexManifest.risks ?? '10 - Risks & Issues.md'],
-      ['changelog', indexManifest.changelog ?? '11 - Changelog.md'],
+      [
+        'decisions',
+        resolveSemanticPath(
+          indexManifest,
+          indexAliases,
+          'decisions',
+          '04 - Decisions.md',
+        ),
+      ],
+      [
+        'risks',
+        resolveSemanticPath(
+          indexManifest,
+          indexAliases,
+          'risks',
+          '10 - Risks & Issues.md',
+        ),
+      ],
+      [
+        'changelog',
+        resolveSemanticPath(
+          indexManifest,
+          indexAliases,
+          'changelog',
+          '11 - Changelog.md',
+        ),
+      ],
     ] as const) {
       const content = await readOptional(target);
       if (!content) continue;

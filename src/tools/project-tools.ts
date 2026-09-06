@@ -1,12 +1,56 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolContext } from './tool-utils.js';
-import { readOnlyAnnotations, runTool } from './tool-utils.js';
+import {
+  closedWorldAnnotations,
+  destructiveAnnotations,
+  readOnlyAnnotations,
+  runTool,
+} from './tool-utils.js';
 
 export function registerProjectTools(
   server: McpServer,
   context: ToolContext,
 ): void {
+  server.registerTool(
+    'initialize_project',
+    {
+      description:
+        'Create or replace the generated .obsidian-local project mapping files and sync their roles to a registered vault.',
+      inputSchema: {
+        projectPath: z.string().trim().min(1),
+        vault: z.string().trim().min(1),
+        overwriteGenerated: z.boolean().default(true),
+      },
+      annotations: destructiveAnnotations,
+    },
+    async ({ projectPath, vault, overwriteGenerated }) =>
+      runTool(
+        async () =>
+          context.bootstrap.initialize(projectPath, vault, overwriteGenerated),
+        (data) =>
+          `Initialized ${data.files.length} project configuration file(s) for ${data.vault}`,
+      ),
+  );
+
+  server.registerTool(
+    'sync_project_config',
+    {
+      description:
+        'Apply the .obsidian-local/mapping.yaml documentation tree to the registered vault mapping without changing vault notes.',
+      inputSchema: {
+        projectPath: z.string().trim().min(1),
+      },
+      annotations: closedWorldAnnotations,
+    },
+    async ({ projectPath }) =>
+      runTool(
+        async () => context.bootstrap.sync(projectPath),
+        (data) =>
+          `Synchronized ${data.added.length + data.changed.length} project mapping change(s)`,
+      ),
+  );
+
   server.registerTool(
     'get_project_context',
     {

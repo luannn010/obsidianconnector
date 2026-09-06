@@ -14,6 +14,9 @@ export const CodebaseIndexConfigSchema = z
     roles: z
       .record(z.string().trim().min(1), z.string().trim().min(1))
       .default({}),
+    aliases: z
+      .record(z.string().trim().min(1), z.string().trim().min(1))
+      .default({}),
   })
   .default({});
 
