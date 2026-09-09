@@ -123,6 +123,40 @@ function syncStatusPool(fixture: SyncStatusFixture): PgPoolLike {
 }
 
 describe('PostgreSQL knowledge store', () => {
+  it('does not bind a project snapshot to a removed worktree', async () => {
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('not used');
+      },
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('w.registered')) return { rows: [] };
+        return {
+          rows: [
+            {
+              project_id: 'project-1',
+              db_revision: 4,
+              worktree_id: 'removed-worktree',
+              snapshot_id: 'stale-snapshot',
+              head_commit: 'old-head',
+              snapshot_head: 'old-head',
+              state: 'active',
+            },
+          ] as unknown as Row[],
+        };
+      },
+    };
+
+    await expect(
+      new PgKnowledgeStore(pool).getProjectSnapshot({
+        projectKey: 'MC-Platform',
+        worktreePath: 'C:/repo/.worktrees/removed',
+        maxTokens: 800,
+      }),
+    ).rejects.toMatchObject({ code: 'INDEX_STALE' });
+  });
+
   it('rolls back a batch when the expected project revision is stale', async () => {
     const client = new FakeClient();
     const pool: PgPoolLike = {
@@ -234,6 +268,41 @@ describe('PostgreSQL knowledge store', () => {
       changedOnly: true,
     });
     expect(result.sourceFreshness).toBe('stale');
+  });
+
+  it('excludes removed worktrees from the current project sync status', async () => {
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('not used');
+      },
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('FROM project_knowledge.projects'))
+          return {
+            rows: [
+              { project_id: 'project-1', db_revision: 4 },
+            ] as unknown as Row[],
+          };
+        if (sql.includes('FROM project_knowledge.worktrees'))
+          return /WHERE w\.project_id=\$1 AND w\.registered/u.test(sql)
+            ? { rows: [] }
+            : {
+                rows: [
+                  { id: 'removed-worktree', freshness: 'stale' },
+                ] as unknown as Row[],
+              };
+        return { rows: [] };
+      },
+    };
+
+    const result = await new PgKnowledgeStore(pool).getProjectSyncStatus({
+      projectKey: 'MC-Platform',
+      changedOnly: true,
+    });
+
+    expect(result.sourceFreshness).toBe('current');
+    expect(result.snapshots).toEqual([]);
   });
 
   it('returns a current-worktree domain audit and keeps unmapped changes stale', async () => {

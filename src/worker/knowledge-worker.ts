@@ -28,10 +28,8 @@ import matter from 'gray-matter';
 import { parseDatabaseMigration } from './database-parser.js';
 import { parseApiContracts } from './api-contract-parser.js';
 import { parseSequenceFlows } from './sequence-parser.js';
-import {
-  buildDomainSyncReport,
-  importDomainManifest,
-} from './domain-audit.js';
+import { buildDomainSyncReport, importDomainManifest } from './domain-audit.js';
+import { deactivateMissingWorktrees } from './worktree-lifecycle.js';
 
 export interface WorkerProject {
   projectKey: string;
@@ -119,9 +117,13 @@ export class KnowledgeWorker {
 
   async reconcile(
     project: WorkerProject,
+    options: { primaryRepositoryPath?: string } = {},
   ): Promise<{ changed: boolean; snapshotId: string; indexedFiles: number }> {
     const fingerprint = await fingerprintWorktree(project.repositoryPath);
     const currentDirty = dirtyPaths(fingerprint.status);
+    const primaryRepositoryPath = path.resolve(
+      options.primaryRepositoryPath ?? fingerprint.root,
+    );
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -143,7 +145,7 @@ export class KnowledgeWorker {
           [
             projectRow.project_id,
             project.name,
-            fingerprint.root,
+            primaryRepositoryPath,
             fingerprint.branch,
           ],
         )
@@ -153,8 +155,9 @@ export class KnowledgeWorker {
           `
         INSERT INTO project_knowledge.worktrees(project_id,repository_id,path,branch,head_commit,dirty_hash,dirty_paths)
         VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(project_id,path) DO UPDATE SET
-          repository_id=EXCLUDED.repository_id,branch=EXCLUDED.branch,head_commit=EXCLUDED.head_commit,
-          dirty_hash=EXCLUDED.dirty_hash,dirty_paths=EXCLUDED.dirty_paths,last_seen_at=now()
+          repository_id=EXCLUDED.repository_id,branch=EXCLUDED.branch,
+          head_commit=EXCLUDED.head_commit,dirty_hash=EXCLUDED.dirty_hash,
+          dirty_paths=EXCLUDED.dirty_paths,registered=true,last_seen_at=now()
         RETURNING id`,
           [
             projectRow.project_id,
@@ -194,7 +197,13 @@ export class KnowledgeWorker {
         await client.query(
           `UPDATE project_knowledge.worktrees SET branch=$2,head_commit=$3,dirty_hash=$4,
              dirty_paths=$5,last_seen_at=now() WHERE id=$1`,
-          [worktree.id, fingerprint.branch, fingerprint.head, fingerprint.dirtyHash, currentDirty],
+          [
+            worktree.id,
+            fingerprint.branch,
+            fingerprint.head,
+            fingerprint.dirtyHash,
+            currentDirty,
+          ],
         );
         await client.query('COMMIT');
         return { changed: false, snapshotId: previous.id, indexedFiles: 0 };
@@ -488,9 +497,12 @@ export class KnowledgeWorker {
     }
   }
 
-  async syncWorktrees(
-    project: WorkerProject,
-  ): Promise<{ registered: number; unmanaged: number }> {
+  async syncWorktrees(project: WorkerProject): Promise<{
+    registered: number;
+    unmanaged: number;
+    removed: number;
+    paths: string[];
+  }> {
     const projectRow = (
       await this.pool.query<{ project_id: string; repository_id: string }>(
         `SELECT p.project_id,r.id AS repository_id FROM project_knowledge.projects p
@@ -523,6 +535,12 @@ export class KnowledgeWorker {
         ],
       );
     }
+    const removed = await deactivateMissingWorktrees(
+      this.pool,
+      projectRow.project_id,
+      projectRow.repository_id,
+      [...registeredPaths],
+    );
     const worktreeRoot = path.join(project.repositoryPath, '.worktrees');
     const directories = await readdir(worktreeRoot, {
       withFileTypes: true,
@@ -545,7 +563,12 @@ export class KnowledgeWorker {
         ],
       );
     }
-    return { registered: registered.length, unmanaged };
+    return {
+      registered: registered.length,
+      unmanaged,
+      removed: removed.length,
+      paths: registered.map((item) => path.resolve(item.path)),
+    };
   }
 
   async importLegacy(project: WorkerProject): Promise<number> {
@@ -1194,7 +1217,11 @@ export class KnowledgeWorker {
     if (!projectRow)
       throw new Error('Project must be reconciled before publishing');
     const activeSnapshot = (
-      await this.pool.query<{ id: string; head_commit: string; dirty_hash: string | null }>(
+      await this.pool.query<{
+        id: string;
+        head_commit: string;
+        dirty_hash: string | null;
+      }>(
         `
       SELECT s.id,s.head_commit,s.dirty_hash FROM project_knowledge.source_snapshots s
       JOIN project_knowledge.worktrees w ON w.id=s.worktree_id
@@ -1798,10 +1825,16 @@ export class KnowledgeWorker {
             auditedDomain.currentDirtyHash ?? null,
             domainSync.indexedCommit ?? null,
             domainSync.indexedDirtyHash ?? null,
-            result.state === 'current' ? auditedDomain.currentCommit : (auditedDomain.lastSyncedCommit ?? null),
-            result.state === 'current' ? (auditedDomain.currentDirtyHash ?? null) : (auditedDomain.lastSyncedDirtyHash ?? null),
+            result.state === 'current'
+              ? auditedDomain.currentCommit
+              : (auditedDomain.lastSyncedCommit ?? null),
+            result.state === 'current'
+              ? (auditedDomain.currentDirtyHash ?? null)
+              : (auditedDomain.lastSyncedDirtyHash ?? null),
             auditedDomain.databaseRevision,
-            result.state === 'current' ? projectRow.db_revision : (auditedDomain.projectionRevision ?? null),
+            result.state === 'current'
+              ? projectRow.db_revision
+              : (auditedDomain.projectionRevision ?? null),
             auditedDomain.reasons,
             auditedDomain.changedPaths,
             auditedDomain.evidenceRefs,

@@ -346,7 +346,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
           WHERE project_id = p.project_id AND worktree_id = w.id AND state = 'active'
           ORDER BY activated_at DESC NULLS LAST LIMIT 1
         ) s ON true
-        WHERE p.project_key = $1 AND w.path = $2
+        WHERE p.project_key = $1 AND w.path = $2 AND w.registered
       `,
         [input.projectKey, path.resolve(input.worktreePath)],
       );
@@ -1206,7 +1206,8 @@ export class PgKnowledgeStore implements KnowledgeStore {
              WHERE worktree_id=w.id AND state='active'
              ORDER BY activated_at DESC NULLS LAST LIMIT 1
            ) s ON true
-           WHERE w.project_id=$1 AND ($2::uuid[] IS NULL OR w.id=ANY($2))
+           WHERE w.project_id=$1 AND w.registered
+             AND ($2::uuid[] IS NULL OR w.id=ANY($2))
            ORDER BY w.last_seen_at DESC LIMIT 20`,
           [row.project_id, input.worktreeIds ?? null],
         ),

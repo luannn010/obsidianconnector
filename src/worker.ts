@@ -13,6 +13,7 @@ import {
 import { drainQueueBatches } from './worker/drain-queue.js';
 import { acquireSingletonLock } from './worker/singleton-lock.js';
 import { runStatusFirstSync } from './worker/status-first-sync.js';
+import { synchronizeProjectWorktrees } from './worker/worktree-lifecycle.js';
 
 loadDotEnv();
 const runtime = getRuntimeConfig({
@@ -70,8 +71,7 @@ let sourceRefreshRequested = true;
 let maintenanceRequested = true;
 
 async function bootstrap(): Promise<Record<string, unknown>> {
-  const indexed = await worker.reconcile(project);
-  const worktrees = await worker.syncWorktrees(project);
+  const worktrees = await synchronizeProjectWorktrees(worker, project);
   const legacy = await worker.importLegacy(project);
   const delivery = await worker.normalizeLegacyDelivery(project);
   const documents = await worker.syncCanonicalDocuments(project);
@@ -84,7 +84,6 @@ async function bootstrap(): Promise<Record<string, unknown>> {
   const projections = await worker.publishVault(project);
   return {
     mode: 'bootstrap',
-    indexed,
     worktrees,
     legacy,
     delivery,
@@ -123,10 +122,13 @@ async function synchronize(): Promise<void> {
                 actionLimit: 10,
               }),
             reindexSource: async () => {
-              const indexed = await worker.reconcile(project);
-              cycle.indexed = indexed;
-              cycle.worktrees = await worker.syncWorktrees(project);
-              if (indexed.changed) rerun = true;
+              const worktrees = await synchronizeProjectWorktrees(
+                worker,
+                project,
+              );
+              cycle.worktrees = worktrees;
+              if (worktrees.indexedWorktrees.some((entry) => entry.changed))
+                rerun = true;
             },
             updateKnowledge: async () => {
               cycle.documents = await worker.syncCanonicalDocuments(project);
