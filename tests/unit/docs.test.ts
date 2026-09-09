@@ -41,4 +41,19 @@ describe('README documentation', () => {
       expect(readme).toContain(phrase);
     }
   });
+
+  it('documents safe token budgets for the project-knowledge workflow', async () => {
+    const skill = await readFile(
+      new URL(
+        '../../.codex/skills/project-to-obsidian/SKILL.md',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+
+    expect(skill).toMatch(/omit `maxTokens`.*default.*800/iu);
+    expect(skill).toMatch(/snapshot.*maximum.*1,600/iu);
+    expect(skill).toMatch(/search.*maximum.*4,000/iu);
+    expect(skill).toMatch(/expansion.*maximum.*6,000/iu);
+  });
 });

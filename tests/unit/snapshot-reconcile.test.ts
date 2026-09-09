@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { clearChangedSnapshotRows } from '../../src/worker/knowledge-worker.js';
+import {
+  appendIndexablePreviousDirtyPaths,
+  clearChangedSnapshotRows,
+} from '../../src/worker/knowledge-worker.js';
 
 describe('snapshot changed-file cleanup', () => {
   it('deletes dependent symbols before their code files', async () => {
@@ -23,5 +26,20 @@ describe('snapshot changed-file cleanup', () => {
       'DELETE FROM project_knowledge.search_chunks',
     );
     expect(statements[2]).toContain('DELETE FROM project_knowledge.code_files');
+  });
+
+  it('does not reintroduce stale binary or secret paths as indexable changes', () => {
+    const changes = [{ status: 'A', path: 'src/current.ts' }];
+
+    appendIndexablePreviousDirtyPaths(changes, [
+      'apps/mobile/assets/icon.png',
+      '.env.local',
+      'src/previous.ts',
+    ]);
+
+    expect(changes).toEqual([
+      { status: 'A', path: 'src/current.ts' },
+      { status: 'M', path: 'src/previous.ts' },
+    ]);
   });
 });

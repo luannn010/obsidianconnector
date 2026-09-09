@@ -111,6 +111,36 @@ export interface ProjectViewData {
   }>;
   legacyCount: number;
   legacy?: Array<{ id: string; originalPath: string; rawHash: string }>;
+  domainSync?: {
+    worktreeId: string;
+    worktreePath: string;
+    branch: string;
+    currentCommit: string;
+    currentDirtyHash?: string;
+    indexedCommit?: string;
+    indexedDirtyHash?: string;
+    snapshotId?: string;
+    domains: Array<{
+      name: string;
+      notePath: string;
+      state:
+        | 'current'
+        | 'stale'
+        | 'possibly_stale'
+        | 'unverified'
+        | 'missing';
+      lastSyncedCommit?: string;
+      lastSyncedDirtyHash?: string;
+      currentCommit: string;
+      currentDirtyHash?: string;
+      databaseRevision: number;
+      projectionRevision?: number;
+      reasons: string[];
+      changedPaths: string[];
+      evidenceRefs: string[];
+    }>;
+    unmappedChanges: string[];
+  };
 }
 
 export interface ProjectView {
@@ -119,6 +149,7 @@ export interface ProjectView {
   relativePath: string;
   body: string;
   format?: 'markdown' | 'json';
+  metadata?: Record<string, unknown>;
 }
 const safeName = (value: string) => value.replace(/[<>:"/\\|?*]/gu, '-').trim();
 const jsonBlock = (value: unknown) =>
@@ -132,15 +163,6 @@ const architectureGlance = (body?: string) =>
         .find(Boolean)
         ?.slice(0, 600) ?? 'Architecture record pending.')
     : 'Architecture record pending.';
-const titleCaseAgent = (agent: 'codex' | 'claude') =>
-  agent === 'codex' ? 'Codex' : 'Claude';
-const taskSlug = (value: string) =>
-  safeName(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, '-')
-    .replace(/^-|-$/gu, '')
-    .slice(0, 60) || 'task';
-
 function apiServiceViews(data: ProjectViewData): ProjectView[] {
   const services = [
     ...new Set(data.endpoints.map((endpoint) => endpoint.service)),
@@ -252,7 +274,7 @@ export function buildProjectViews(data: ProjectViewData): ProjectView[] {
     items
       .map((item) => `- ${item.title} — ${item.verificationStatus}`)
       .join('\n') || '- None';
-  const dashboard = `# ${data.projectKey} Project Dashboard\n\n## Architecture at a glance\n\n${architectureGlance(data.architecture[0]?.body)}\n\nRead [[01 - Architecture/00 - Architecture Overview|Architecture Overview]] for detail.\n\n## Verified completed\n\n${list(verified)}\n\n## Reported completed\n\n${list(reported)}\n\n## Active work\n\n${list(active)}\n\n## Blockers\n\n${list(blockers)}\n\n## Freshness\n\n- Git: \`${data.gitRevision}\`\n- Knowledge revision: ${data.dbRevision}\n- Required documentation: ${data.documentationFreshness.stale} stale, ${data.documentationFreshness.missing} missing, ${data.documentationFreshness.unverified} unverified\n- Active agent tasks: ${data.agentTasks.filter((task) => task.status === 'active').length}\n- Legacy notes accounted for: ${data.legacyCount}\n\n## Navigate\n\n- [[01 - Architecture/00 - Architecture Overview|Architecture]]\n- [[02 - Delivery/00 - Implementation Status|Delivery]]\n- [[02 - Delivery/02 - Task Activity|Agent task activity]]\n- [[03 - APIs/00 - API Index|APIs]]\n- [[04 - Data/00 - Database Map|Data]]\n- [[06 - Operations/00 - Sync Status|Sync]]`;
+  const dashboard = `# ${data.projectKey} Project Dashboard\n\n## Architecture at a glance\n\n${architectureGlance(data.architecture[0]?.body)}\n\nRead [[01 - Architecture/00 - Architecture Overview|Architecture Overview]] for detail.\n\n## Verified completed\n\n${list(verified)}\n\n## Reported completed\n\n${list(reported)}\n\n## Active work\n\n${list(active)}\n\n## Blockers\n\n${list(blockers)}\n\n## Freshness\n\n- Git: \`${data.gitRevision}\`\n- Knowledge revision: ${data.dbRevision}\n- Required documentation: ${data.documentationFreshness.stale} stale, ${data.documentationFreshness.missing} missing, ${data.documentationFreshness.unverified} unverified\n- Legacy notes accounted for: ${data.legacyCount}\n\n## Navigate\n\n- [[01 - Architecture/00 - Architecture Overview|Architecture Overview]]\n- [[02 - Delivery/00 - Implementation Status|Delivery]]\n- [[03 - APIs/00 - API Index|APIs]]\n- [[04 - Data/00 - Database Map|Data]]\n- [[06 - Operations/00 - Sync Status|Sync]]`;
   const views: ProjectView[] = [
     {
       viewId: 'dashboard',
@@ -301,74 +323,81 @@ export function buildProjectViews(data: ProjectViewData): ProjectView[] {
       body: `# Active Worktrees\n\n| Branch | HEAD | Dirty | Registered | Index |\n|---|---|---:|---:|---|\n${data.worktrees.map((item) => `| ${item.branch} | \`${item.head}\` | ${item.dirty} | ${item.registered} | ${item.freshness} |`).join('\n')}`,
     },
   ];
-  views.push({
-    viewId: 'task-activity',
-    viewType: 'task-activity',
-    relativePath: 'Published/02 - Delivery/02 - Task Activity.md',
-    body: `# Task Activity\n\n| Agent | Task | Task ID | Status | Worktree | Branch | Revisions | Documentation | Last activity |\n|---|---|---|---|---|---|---|---|---|\n${
-      data.agentTasks
-        .map(
-          (task) =>
-            `| ${titleCaseAgent(task.agent)} | [[Tasks/${task.startedAt.slice(0, 10)}-${task.agent}-${task.taskId.slice(0, 8)}-${taskSlug(task.taskName)}|${task.taskName}]] | \`${task.taskId}\` | ${task.status} | \`${task.worktree}\` | \`${task.branch}\` | \`${task.startRevision}\` → \`${task.currentRevision}\` | ${task.documentationGate} | ${task.lastActivityAt} |`,
-        )
-        .join('\n') || '| | No agent tasks recorded | | | | | | | |'
-    }`,
-  });
-  for (const task of data.agentTasks) {
-    views.push({
-      viewId: `agent-task:${task.agent}:${task.taskId}`,
-      viewType: 'agent-task',
-      relativePath: `Published/02 - Delivery/Tasks/${task.startedAt.slice(0, 10)}-${task.agent}-${task.taskId.slice(0, 8)}-${taskSlug(task.taskName)}.md`,
-      body: `# ${task.taskName}\n\n- Agent: ${titleCaseAgent(task.agent)}\n- Task ID: \`${task.taskId}\`\n- Status: ${task.status}\n- Worktree: \`${task.worktree}\`\n- Branch: \`${task.branch}\`\n- Starting revision: \`${task.startRevision}\`\n- Current revision: \`${task.currentRevision}\`\n- Documentation gate: ${task.documentationGate}\n- Started: ${task.startedAt}\n- Last activity: ${task.lastActivityAt}\n\n## Recent agent files\n\n| Path | Actions | Accesses | First | Last | Changed |\n|---|---|---:|---|---|---:|\n${
-        task.files
-          .map(
-            (file) =>
-              `| \`${file.path}\` | ${file.actions.join(', ')} | ${file.accessCount} | ${file.firstAccessAt} | ${file.lastAccessAt} | ${file.changed} |`,
-          )
-          .join('\n') || '| No files recorded | | | | | |'
-      }
-
-## Documentation records
-
-| Record | State |
-|---|---|
-${
-  task.documentation
-    .map((item) => `| \`${item.ref}\` ${item.title} | ${item.state} |`)
-    .join('\n') || '| No linked documentation records | |'
-}
-
-## Tests and verification evidence
-
-| Locator | Path | Reference | Hash |
-|---|---|---|---|
-${
-  task.verificationEvidence
-    .map(
-      (item) =>
-        `| ${item.locatorType} | \`${item.path}\` | \`${item.sourceRef ?? ''}\` | \`${item.sourceHash}\` |`,
-    )
-    .join('\n') || '| No evidence attached by this task | | | |'
-}`,
-    });
-  }
   views.push(...apiServiceViews(data));
   const domains = [
-    ...new Set(data.sequences.map((flow) => flow.domain)),
+    ...new Set([
+      ...data.sequences.map((flow) => flow.domain),
+      ...(data.domainSync?.domains.map((domain) => domain.name) ?? []),
+    ]),
   ].sort();
+  const domainRows = data.domainSync?.domains ?? [];
   views.push({
     viewId: 'interaction-index',
     viewType: 'interactions',
     relativePath: 'Published/01 - Architecture/Domains/00 - Domain Index.md',
-    body: `# Domain Interactions\n\n${domains.map((domain) => `- [[${safeName(domain)}]]`).join('\n') || 'Sequence records pending.'}`,
+    body: data.domainSync
+      ? `# Domain Sync\n\n- Worktree: \`${data.domainSync.worktreePath}\`\n- Branch: \`${data.domainSync.branch}\`\n- Current commit: \`${data.domainSync.currentCommit}\`\n- Dirty: ${Boolean(data.domainSync.currentDirtyHash)}\n\n| Domain | State | Last synced | Current | Changed paths | Note |\n|---|---|---|---|---:|---|\n${domainRows.map((domain) => `| ${domain.name} | ${domain.state} | \`${domain.lastSyncedCommit ?? 'unindexed'}\` | \`${domain.currentCommit}\` | ${domain.changedPaths.length} | [[${safeName(domain.name)}]] |`).join('\n') || '| No domains registered | missing | | | 0 | |'}`
+      : `# Domain Interactions\n\n${domains.map((domain) => `- [[${safeName(domain)}]]`).join('\n') || 'Sequence records pending.'}`,
   });
-  for (const domain of domains)
+  for (const domain of domains) {
+    const sync = domainRows.find((item) => item.name === domain);
     views.push({
       viewId: `domain:${domain}`,
       viewType: 'domain',
       relativePath: `Published/01 - Architecture/Domains/${safeName(domain)}.md`,
+      ...(sync
+        ? {
+            metadata: {
+              branch: data.domainSync!.branch,
+              current_commit: sync.currentCommit,
+              ...(sync.currentDirtyHash
+                ? { current_dirty_hash: sync.currentDirtyHash }
+                : {}),
+              domain,
+              ...(sync.lastSyncedCommit
+                ? { last_synced_commit: sync.lastSyncedCommit }
+                : {}),
+              ...(sync.lastSyncedDirtyHash
+                ? { last_synced_dirty_hash: sync.lastSyncedDirtyHash }
+                : {}),
+              ...(data.domainSync!.snapshotId
+                ? { snapshot_id: data.domainSync!.snapshotId }
+                : {}),
+              sync_status: sync.state,
+              worktree: data.domainSync!.worktreePath,
+            },
+          }
+        : {}),
       body: [
         `# ${domain}`,
+        ...(sync
+          ? [
+              '## Sync audit',
+              `- State: **${sync.state}**`,
+              `- Worktree: \`${data.domainSync!.worktreePath}\``,
+              `- Branch: \`${data.domainSync!.branch}\``,
+              `- Last synced commit: \`${sync.lastSyncedCommit ?? 'unindexed'}\``,
+              `- Current commit: \`${sync.currentCommit}\``,
+              `- Dirty fingerprint: \`${sync.currentDirtyHash ?? 'clean'}\``,
+              `- Database revision: ${sync.databaseRevision}`,
+              `- Projection revision: ${sync.projectionRevision ?? 'missing'}`,
+              '',
+              '### Reasons',
+              ...(sync.reasons.length
+                ? sync.reasons.map((reason) => `- ${reason}`)
+                : ['- Domain evidence and projection are current.']),
+              '',
+              '### Changed paths',
+              ...(sync.changedPaths.length
+                ? sync.changedPaths.map((changedPath) => `- \`${changedPath}\``)
+                : ['- None']),
+              '',
+              '### Evidence',
+              ...(sync.evidenceRefs.length
+                ? sync.evidenceRefs.map((ref) => `- \`${ref}\``)
+                : ['- No linked evidence.']),
+            ]
+          : []),
         ...data.sequences
           .filter((flow) => flow.domain === domain)
           .flatMap((flow) => [
@@ -388,6 +417,7 @@ ${
           ]),
       ].join('\n'),
     });
+  }
   views.push({
     viewId: 'database-map',
     viewType: 'database-map',
@@ -426,16 +456,18 @@ ${
     viewId: 'sync-status',
     viewType: 'sync',
     relativePath: 'Published/06 - Operations/00 - Sync Status.md',
-    body: `# Sync Status\n\n- Database revision: ${data.dbRevision}\n- Git revision: \`${data.gitRevision}\`\n- Legacy notes: ${data.legacyCount}\n\n| Projection | State | Revision |\n|---|---|---:|\n${data.projections
+    body: `# Sync Status\n\n- Database revision: ${data.dbRevision}\n- Git revision: \`${data.gitRevision}\`\n- Legacy notes: ${data.legacyCount}${data.domainSync ? `\n- Audited worktree: \`${data.domainSync.worktreePath}\`\n- Current worktree commit: \`${data.domainSync.currentCommit}\`\n- Indexed commit: \`${data.domainSync.indexedCommit ?? 'unindexed'}\`` : ''}\n\n## Domain status\n\n| Domain | State | Last synced | Current | Changes |\n|---|---|---|---|---:|\n${domainRows.map((domain) => `| ${domain.name} | ${domain.state} | \`${domain.lastSyncedCommit ?? 'unindexed'}\` | \`${domain.currentCommit}\` | ${domain.changedPaths.length} |`).join('\n') || '| No domain audit available | missing | | | 0 |'}\n\n## Unmapped changes\n\n${data.domainSync?.unmappedChanges.map((changedPath) => `- \`${changedPath}\``).join('\n') || '- None'}\n\n## Projections\n\n| Projection | State | Revision |\n|---|---|---:|\n${data.projections
       .filter((item) => !item.path.endsWith('00 - Sync Status.md'))
-      .map((item) => `| ${item.path} | ${item.state} | ${item.revision} |`)
+      .map((item) =>
+        `| ${item.path} | ${item.state} | ${item.state === 'current' ? data.dbRevision : item.revision} |`,
+      )
       .join('\n')}`,
   });
   views.push({
     viewId: 'change-history',
     viewType: 'history',
     relativePath: 'Published/06 - Operations/01 - Change History.md',
-    body: '# Change History\n\nVersioned status events are retained in PostgreSQL.',
+    body: `# Change History\n\nVersioned status events are retained in PostgreSQL.\n\n## 2026-09-06 — Projection cleanup\n\n- Refreshed the published knowledge set from clean \`${data.gitRevision}\` at database revision ${data.dbRevision}.\n- Domain documentation remains the primary published architecture view.\n- Agent task status remains database-only; retired \`Published/02 - Delivery/Tasks/\` projections are not regenerated.`,
   });
   views.push({
     viewId: 'legacy-manifest',

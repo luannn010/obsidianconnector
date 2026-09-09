@@ -1,46 +1,34 @@
 ---
 name: project-to-obsidian
-description: Use when retrieving, updating, or publishing project knowledge through the SQL-backed obsidian-local MCP server.
+description: Use when retrieving, auditing, synchronizing, updating, or publishing project knowledge through the SQL-backed obsidian-local MCP server.
 ---
 
 # Project to Obsidian
 
-## Authority and retrieval
+## Compact sync loop
 
-- Git, tests, migrations, and configuration are authoritative for executable behavior.
-- PostgreSQL `project_knowledge` is authoritative for normalized knowledge, history, delivery, contracts, mappings, and projections.
-- Search indexes are rebuildable. Obsidian `Published/` is a generated human view; `Inbox/` is its editable intake boundary.
-- At task startup call `get_project_snapshot` with the exact current worktree path and client task ID. Codex and Claude lifecycle hooks supply the agent and concise task name separately; do not send unsupported `agent` or `taskName` fields to the compact MCP tool. Keep its immutable snapshot ID and returned task reference for later calls.
-- Use `search_project_context` to discover context. Exact paths, symbols, routes, tables, IDs, and worktree names use `auto` or `exact`; conceptual questions use `hybrid`.
-- Use `expand_project_context` only for returned references that are needed. Do not recursively scan the repository or vault for routine context.
-- Open the exact source file before editing executable code when freshness matters.
+PostgreSQL `project_knowledge` is the canonical knowledge store. Git, tests, migrations, and configuration are authoritative for executable behavior. Obsidian `Published/` is generated; `Inbox/` is editable intake.
 
-## Response contract
+1. Call `get_project_sync_status` first with `compact: true` and `changedOnly: true`. Read `structuredContent`; the text block is only a summary.
+2. If freshness is `current`, failed and pending jobs are zero, and no actions exist, stop. Do not fetch a snapshot or search.
+3. If `summary.failedJobs` is greater than zero, report `topIssues` and ask for an explicit override before automatic repair.
+4. Execute only `topSuggestedActions`, in returned order, after their `dependsOn` actions:
+   - `REINDEX_SOURCE`: let the worker refresh only `changedPaths`. When reindexing changes the fingerprint, make one new compact status call.
+   - `UPDATE_KNOWLEDGE`: retrieve only the action's exact `changedPaths`. Use exact search and expand only returned `chunk:` handles or action `evidenceRefs`, up to eight refs. Patch the resolved `relatedItemIds`; do not run a broad search.
+   - `VERIFY_EVIDENCE`: check only listed evidence refs and paths against Git, tests, migrations, or configuration. Attach authoritative evidence or leave the blocker unresolved.
+   - `FINALIZE_PROJECTION`: leave publishing to the worker lifecycle. In quick mode, do not poll projection-only work; use `compact: false` only when the user requests deep troubleshooting.
+5. After semantic writes, call compact status once and report changed items, unresolved blockers, estimated writes/tokens, and the final `cacheKey`. Do not re-read unchanged context.
 
-- Read returned records from MCP `structuredContent`; the text block is only a compact summary.
-- Carry `snapshotId` from the snapshot into search and expansion. Carry `dbRevision` into optimistic writes.
-- A writable canonical hit exposes `itemId`, `itemVersion`, and `stableKey`. Use `itemId` plus `itemVersion` for patch or append. A hit without them is source-derived evidence; create a canonical correction with its citation instead of guessing an item identity.
-- Pass expansion handles in the `refs` array and expand no more than eight references. Use `full` with the current connector; the other accepted view names currently return the same chunk rather than relation-specific projections.
-- Respect each response's complete `budget`, `warnings`, `omissions`, freshness, hashes, and continuation cursor.
-- If hybrid embeddings or reranking are unavailable, use the returned exact/BM25 results and report the degraded warning.
+Treat `omitted` counts as a high-cost batch signal. Stop before expanding it and request deep mode or a narrower worktree/domain scope.
 
-## Writes and human publication
+## Bounded retrieval and writes
 
-- Use `write_project_knowledge` for create, patch, append, and supersede operations. Batch related changes, include task/author provenance, and pass the snapshot project revision plus item versions.
-- When a change describes executable behavior, attach `evidence` entries returned by the bound snapshot. Use exact `chunk:` refs and choose `path`, `symbol`, `endpoint`, `table`, `migration`, or `test`. Mark evidence required for API contracts, database dictionaries, architecture boundaries, permissions, and operational runbooks.
-- Keep `delivery_status` separate from `verification_status`. Agent-reported completion remains unverified until supported by Git, tests, migrations, configuration, or explicit evidence.
-- Use `get_project_sync_status` after writes to report index freshness, documentation freshness, active tasks, queued projections, conflicts, and changed items. Filter by the current task and worktree when possible.
-- Treat `DOCS_STALE` as a required follow-up: retrieve the returned knowledge references, update them with evidence from the bound snapshot, and retry verified completion. Do not downgrade verification to bypass the gate.
-- Manual edits to generated files are conflicts. Preserve them in `Inbox/Conflicts`; incorporate the intended change through a canonical knowledge write or Inbox import, then regenerate.
-- A human may add an Inbox note with `kind` and `title` frontmatter. Add `target_id` to patch an existing record.
+When an action needs source context, call `get_project_snapshot` with the exact worktree path and client task ID. Omit `maxTokens` for the default 800-token snapshot; the snapshot maximum is 1,600. Carry `snapshotId` into search/expansion and `dbRevision` into writes.
 
-## Safety rules
+Use `search_project_context` for discovery: exact paths, symbols, routes, tables, IDs, and worktrees use `exact` or `auto`; concepts use `hybrid`. The search maximum is 4,000 tokens. Use `expand_project_context` only for returned refs; the expansion maximum is 6,000. Respect budgets, warnings, omissions, freshness, hashes, and cursors.
 
-- Bind retrieval to the task snapshot. Cross-worktree comparison must be explicit.
-- Depend on Codex and Claude lifecycle hooks for Recent Agent Files. Never read or edit `.obsidian/workspace.json` as task evidence; `lastOpenFiles` is only Obsidian UI history.
-- Do not invent endpoint examples, statuses, owners, mappings, or completion. Mark missing evidence as incomplete or `needs_review`.
-- Keep secrets, credentials, environment files, logs, dependencies, and build output out of general retrieval and embeddings.
+Use `write_project_knowledge` for create, patch, append, and supersede. Batch related changes and use `itemId` plus `itemVersion` for updates. Executable claims require exact snapshot evidence. Keep delivery and verification status separate. `DOCS_STALE` requires evidence-backed repair; never downgrade verification to bypass it.
 
-## Connector tool mapping
+Manual edits under `Published/` are conflicts. Preserve them through `Inbox/Conflicts`, update canonical knowledge, then regenerate. Never use `.obsidian/workspace.json` as evidence. Exclude secrets, credentials, logs, dependencies, and build output.
 
-The routine profile contains exactly `get_project_snapshot`, `search_project_context`, `expand_project_context`, `write_project_knowledge`, and `get_project_sync_status`. Vault/file tools are available only in the `admin/legacy` profile for migration, repair, and explicit administration.
+The routine profile contains exactly `get_project_snapshot`, `search_project_context`, `expand_project_context`, `write_project_knowledge`, and `get_project_sync_status`. Vault/file tools are admin-only.

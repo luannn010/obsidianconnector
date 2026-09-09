@@ -13,16 +13,25 @@ import {
   fingerprintWorktree,
   listIndexableFiles,
   listRegisteredWorktrees,
+  shouldIndexPath,
 } from './git-worktree.js';
 import { inventoryLegacyNotes } from './legacy-inventory.js';
 import { parseSourceUnits } from './source-parser.js';
 import { buildProjectViews, type ProjectViewData } from './vault-views.js';
-import { publishProjection, renderManagedNote } from './projection.js';
+import {
+  publishProjection,
+  removeProjection,
+  renderManagedNote,
+} from './projection.js';
 import { PgKnowledgeStore } from '../knowledge/pg-store.js';
 import matter from 'gray-matter';
 import { parseDatabaseMigration } from './database-parser.js';
 import { parseApiContracts } from './api-contract-parser.js';
 import { parseSequenceFlows } from './sequence-parser.js';
+import {
+  buildDomainSyncReport,
+  importDomainManifest,
+} from './domain-audit.js';
 
 export interface WorkerProject {
   projectKey: string;
@@ -85,6 +94,18 @@ export async function clearChangedSnapshotRows(
   );
 }
 
+export function appendIndexablePreviousDirtyPaths(
+  changes: Array<{ status: string; path: string }>,
+  previousDirtyPaths: string[],
+): void {
+  for (const oldDirty of previousDirtyPaths)
+    if (
+      shouldIndexPath(oldDirty) &&
+      !changes.some((change) => change.path === oldDirty)
+    )
+      changes.push({ status: 'M', path: oldDirty });
+}
+
 export class KnowledgeWorker {
   constructor(
     private readonly pool: Pool,
@@ -100,6 +121,7 @@ export class KnowledgeWorker {
     project: WorkerProject,
   ): Promise<{ changed: boolean; snapshotId: string; indexedFiles: number }> {
     const fingerprint = await fingerprintWorktree(project.repositoryPath);
+    const currentDirty = dirtyPaths(fingerprint.status);
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -129,9 +151,10 @@ export class KnowledgeWorker {
       const worktree = (
         await client.query<{ id: string }>(
           `
-        INSERT INTO project_knowledge.worktrees(project_id,repository_id,path,branch,head_commit,dirty_hash)
-        VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(project_id,path) DO UPDATE SET
-          repository_id=EXCLUDED.repository_id,branch=EXCLUDED.branch,last_seen_at=now()
+        INSERT INTO project_knowledge.worktrees(project_id,repository_id,path,branch,head_commit,dirty_hash,dirty_paths)
+        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(project_id,path) DO UPDATE SET
+          repository_id=EXCLUDED.repository_id,branch=EXCLUDED.branch,head_commit=EXCLUDED.head_commit,
+          dirty_hash=EXCLUDED.dirty_hash,dirty_paths=EXCLUDED.dirty_paths,last_seen_at=now()
         RETURNING id`,
           [
             projectRow.project_id,
@@ -140,9 +163,15 @@ export class KnowledgeWorker {
             fingerprint.branch,
             fingerprint.head,
             fingerprint.dirtyHash,
+            currentDirty,
           ],
         )
       ).rows[0]!;
+      await importDomainManifest(
+        client,
+        projectRow.project_id,
+        fingerprint.root,
+      );
       const previous = (
         await client.query<{
           id: string;
@@ -163,13 +192,13 @@ export class KnowledgeWorker {
         previous.parser_revision === SOURCE_PARSER_REVISION
       ) {
         await client.query(
-          'UPDATE project_knowledge.worktrees SET last_seen_at=now() WHERE id=$1',
-          [worktree.id],
+          `UPDATE project_knowledge.worktrees SET branch=$2,head_commit=$3,dirty_hash=$4,
+             dirty_paths=$5,last_seen_at=now() WHERE id=$1`,
+          [worktree.id, fingerprint.branch, fingerprint.head, fingerprint.dirtyHash, currentDirty],
         );
         await client.query('COMMIT');
         return { changed: false, snapshotId: previous.id, indexedFiles: 0 };
       }
-      const currentDirty = dirtyPaths(fingerprint.status);
       const snapshot = (
         await client.query<{ id: string }>(
           `
@@ -203,9 +232,7 @@ export class KnowledgeWorker {
                 status: 'A',
                 path: file,
               }));
-        for (const oldDirty of previous.dirty_paths ?? [])
-          if (!changes.some((change) => change.path === oldDirty))
-            changes.push({ status: 'M', path: oldDirty });
+        appendIndexablePreviousDirtyPaths(changes, previous.dirty_paths ?? []);
         await client.query(
           `INSERT INTO project_knowledge.code_files(id,project_id,snapshot_id,repo_relative_path,language,source_hash,deleted)
           SELECT gen_random_uuid(),project_id,$2,repo_relative_path,language,source_hash,deleted FROM project_knowledge.code_files WHERE snapshot_id=$1`,
@@ -251,7 +278,7 @@ export class KnowledgeWorker {
         )
           continue;
         const content = await readFile(absolute, 'utf8').catch(() => undefined);
-        if (content === undefined) continue;
+        if (content === undefined || content.includes('\u0000')) continue;
         const fileHash = sourceHash(content);
         const file = (
           await client.query<{ id: string }>(
@@ -442,12 +469,13 @@ export class KnowledgeWorker {
         [snapshot.id],
       );
       await client.query(
-        `UPDATE project_knowledge.worktrees SET branch=$2,head_commit=$3,dirty_hash=$4,last_seen_at=now() WHERE id=$1`,
+        `UPDATE project_knowledge.worktrees SET branch=$2,head_commit=$3,dirty_hash=$4,dirty_paths=$5,last_seen_at=now() WHERE id=$1`,
         [
           worktree.id,
           fingerprint.branch,
           fingerprint.head,
           fingerprint.dirtyHash,
+          currentDirty,
         ],
       );
       await client.query('COMMIT');
@@ -481,9 +509,9 @@ export class KnowledgeWorker {
     for (const item of registered) {
       const fingerprint = await fingerprintWorktree(item.path);
       await this.pool.query(
-        `INSERT INTO project_knowledge.worktrees(project_id,repository_id,path,branch,head_commit,dirty_hash,registered)
-        VALUES($1,$2,$3,$4,$5,$6,true) ON CONFLICT(project_id,path) DO UPDATE SET branch=EXCLUDED.branch,head_commit=EXCLUDED.head_commit,
-        dirty_hash=EXCLUDED.dirty_hash,registered=true,last_seen_at=now()`,
+        `INSERT INTO project_knowledge.worktrees(project_id,repository_id,path,branch,head_commit,dirty_hash,dirty_paths,registered)
+        VALUES($1,$2,$3,$4,$5,$6,$7,true) ON CONFLICT(project_id,path) DO UPDATE SET branch=EXCLUDED.branch,head_commit=EXCLUDED.head_commit,
+        dirty_hash=EXCLUDED.dirty_hash,dirty_paths=EXCLUDED.dirty_paths,registered=true,last_seen_at=now()`,
         [
           projectRow.project_id,
           projectRow.repository_id,
@@ -491,6 +519,7 @@ export class KnowledgeWorker {
           item.branch,
           item.head,
           fingerprint.dirtyHash,
+          dirtyPaths(fingerprint.status),
         ],
       );
     }
@@ -981,7 +1010,6 @@ export class KnowledgeWorker {
         'sequence_steps',
         'sequence_participants',
         'sequence_flows',
-        'domains',
       ])
         await client.query(
           `DELETE FROM project_knowledge.${table} WHERE project_id=$1`,
@@ -1166,11 +1194,13 @@ export class KnowledgeWorker {
     if (!projectRow)
       throw new Error('Project must be reconciled before publishing');
     const activeSnapshot = (
-      await this.pool.query<{ id: string; head_commit: string }>(
+      await this.pool.query<{ id: string; head_commit: string; dirty_hash: string | null }>(
         `
-      SELECT s.id,s.head_commit FROM project_knowledge.source_snapshots s
-      WHERE s.project_id=$1 AND s.state='active' ORDER BY s.activated_at DESC LIMIT 1`,
-        [projectRow.project_id],
+      SELECT s.id,s.head_commit,s.dirty_hash FROM project_knowledge.source_snapshots s
+      JOIN project_knowledge.worktrees w ON w.id=s.worktree_id
+      WHERE s.project_id=$1 AND s.state='active' AND w.path=$2
+      ORDER BY s.activated_at DESC LIMIT 1`,
+        [projectRow.project_id, path.resolve(project.repositoryPath)],
       )
     ).rows[0];
     const architecture = (
@@ -1514,6 +1544,11 @@ export class KnowledgeWorker {
         [projectRow.project_id],
       )
     ).rows;
+    const domainSync = await buildDomainSyncReport(this.pool, {
+      projectId: projectRow.project_id,
+      repositoryPath: project.repositoryPath,
+      databaseRevision: Number(projectRow.db_revision),
+    });
     const data: ProjectViewData = {
       projectId: projectRow.project_id,
       projectKey: project.projectKey,
@@ -1653,10 +1688,12 @@ export class KnowledgeWorker {
         originalPath: row.original_path,
         rawHash: row.raw_hash,
       })),
+      ...(domainSync ? { domainSync } : {}),
     };
     let current = 0;
     let drifted = 0;
-    for (const view of buildProjectViews(data)) {
+    const views = buildProjectViews(data);
+    for (const view of views) {
       const existing = (
         await this.pool.query<{
           id: string;
@@ -1685,6 +1722,7 @@ export class KnowledgeWorker {
               viewType: view.viewType,
               dbRevision: Number(projectRow.db_revision),
               gitRevision: activeSnapshot?.head_commit,
+              metadata: view.metadata,
               body: view.body,
             });
       const desiredHash = projectionHash(rendered);
@@ -1706,11 +1744,13 @@ export class KnowledgeWorker {
       const projection = (
         await this.pool.query<{ id: string }>(
           `INSERT INTO project_knowledge.note_projections
-        (project_id,view_id,relative_path,db_revision,canonical_hash,projection_hash,observed_hash,last_published_hash,state)
-        VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8) ON CONFLICT(project_id,view_id) DO UPDATE SET
+        (project_id,view_id,relative_path,db_revision,canonical_hash,projection_hash,observed_hash,last_published_hash,state,worktree_id,source_snapshot_id)
+        VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10) ON CONFLICT(project_id,view_id) DO UPDATE SET
         relative_path=EXCLUDED.relative_path,db_revision=EXCLUDED.db_revision,canonical_hash=EXCLUDED.canonical_hash,
         projection_hash=EXCLUDED.projection_hash,observed_hash=EXCLUDED.observed_hash,
         last_published_hash=CASE WHEN EXCLUDED.state='current' THEN EXCLUDED.projection_hash ELSE project_knowledge.note_projections.last_published_hash END,
+        worktree_id=CASE WHEN EXCLUDED.state='current' THEN EXCLUDED.worktree_id ELSE project_knowledge.note_projections.worktree_id END,
+        source_snapshot_id=CASE WHEN EXCLUDED.state='current' THEN EXCLUDED.source_snapshot_id ELSE project_knowledge.note_projections.source_snapshot_id END,
         state=EXCLUDED.state,updated_at=now() RETURNING id`,
           [
             projectRow.project_id,
@@ -1723,9 +1763,53 @@ export class KnowledgeWorker {
               ? desiredHash
               : (existing?.last_published_hash ?? null),
             result.state,
+            domainSync?.worktreeId ?? null,
+            activeSnapshot?.id ?? null,
           ],
         )
       ).rows[0]!;
+      const auditedDomain = domainSync?.domains.find(
+        (domain) => view.viewId === `domain:${domain.name}`,
+      );
+      if (auditedDomain && domainSync) {
+        await this.pool.query(
+          `INSERT INTO project_knowledge.domain_sync_states
+           (project_id,domain_id,worktree_id,projection_id,source_snapshot_id,state,note_path,
+            current_commit,current_dirty_hash,indexed_commit,indexed_dirty_hash,last_synced_commit,
+            last_synced_dirty_hash,database_revision,projection_revision,reasons,changed_paths,evidence_refs,unmapped_paths)
+           SELECT $1,domain.id,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+           FROM project_knowledge.domains domain WHERE domain.project_id=$1 AND domain.name=$19
+           ON CONFLICT(domain_id,worktree_id) DO UPDATE SET projection_id=EXCLUDED.projection_id,
+             source_snapshot_id=EXCLUDED.source_snapshot_id,state=EXCLUDED.state,note_path=EXCLUDED.note_path,
+             current_commit=EXCLUDED.current_commit,current_dirty_hash=EXCLUDED.current_dirty_hash,
+             indexed_commit=EXCLUDED.indexed_commit,indexed_dirty_hash=EXCLUDED.indexed_dirty_hash,
+             last_synced_commit=EXCLUDED.last_synced_commit,last_synced_dirty_hash=EXCLUDED.last_synced_dirty_hash,
+             database_revision=EXCLUDED.database_revision,projection_revision=EXCLUDED.projection_revision,
+             reasons=EXCLUDED.reasons,changed_paths=EXCLUDED.changed_paths,evidence_refs=EXCLUDED.evidence_refs,
+             unmapped_paths=EXCLUDED.unmapped_paths,checked_at=now()`,
+          [
+            projectRow.project_id,
+            domainSync.worktreeId,
+            projection.id,
+            activeSnapshot?.id ?? null,
+            auditedDomain.state,
+            view.relativePath,
+            auditedDomain.currentCommit,
+            auditedDomain.currentDirtyHash ?? null,
+            domainSync.indexedCommit ?? null,
+            domainSync.indexedDirtyHash ?? null,
+            result.state === 'current' ? auditedDomain.currentCommit : (auditedDomain.lastSyncedCommit ?? null),
+            result.state === 'current' ? (auditedDomain.currentDirtyHash ?? null) : (auditedDomain.lastSyncedDirtyHash ?? null),
+            auditedDomain.databaseRevision,
+            result.state === 'current' ? projectRow.db_revision : (auditedDomain.projectionRevision ?? null),
+            auditedDomain.reasons,
+            auditedDomain.changedPaths,
+            auditedDomain.evidenceRefs,
+            domainSync.unmappedChanges,
+            auditedDomain.name,
+          ],
+        );
+      }
       if (result.state === 'drifted') {
         drifted++;
         if (result.conflictCreated)
@@ -1749,6 +1833,33 @@ export class KnowledgeWorker {
           [projection.id],
         );
       }
+    }
+    const retiredTaskProjections = (
+      await this.pool.query<{
+        id: string;
+        relative_path: string;
+        last_published_hash: string | null;
+      }>(
+        `SELECT id,relative_path,last_published_hash
+         FROM project_knowledge.note_projections
+         WHERE project_id=$1 AND (view_id='task-activity' OR view_id LIKE 'agent-task:%')`,
+        [projectRow.project_id],
+      )
+    ).rows;
+    for (const projection of retiredTaskProjections) {
+      await removeProjection(
+        project.vaultPath,
+        projection.relative_path,
+        projection.last_published_hash ?? undefined,
+      );
+      await this.pool.query(
+        'DELETE FROM project_knowledge.projection_conflicts WHERE projection_id=$1',
+        [projection.id],
+      );
+      await this.pool.query(
+        'DELETE FROM project_knowledge.note_projections WHERE id=$1',
+        [projection.id],
+      );
     }
     await this.pool.query(
       `UPDATE project_knowledge.outbox_jobs SET state='done',last_error=NULL

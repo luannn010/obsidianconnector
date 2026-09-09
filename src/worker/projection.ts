@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import matter from 'gray-matter';
@@ -13,6 +13,7 @@ export interface ManagedNoteInput {
   gitRevision?: string;
   body: string;
   generatedAt?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export function renderManagedNote(input: ManagedNoteInput): string {
@@ -26,6 +27,7 @@ export function renderManagedNote(input: ManagedNoteInput): string {
     sync_status: 'current',
     view_id: input.viewId,
     view_type: input.viewType,
+    ...(input.metadata ?? {}),
   };
   const preliminary = `---\n${stringify(base, { sortMapEntries: true, lineWidth: 0 }).trimEnd()}\n---\n${input.body.trimEnd()}\n`;
   const finalData = { ...base, projection_hash: projectionHash(preliminary) };
@@ -128,4 +130,36 @@ export async function publishProjection(
   await rename(temporary, target);
   const observedHash = projectionHash(await readFile(target, 'utf8'));
   return { state: 'current', observedHash };
+}
+
+export async function removeProjection(
+  vaultRoot: string,
+  relativePath: string,
+  lastPublishedHash?: string,
+): Promise<{ removed: boolean; preservedPath?: string }> {
+  const target = safeTarget(vaultRoot, relativePath);
+  const current = await readFile(target, 'utf8').catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    },
+  );
+  if (current === undefined) return { removed: false };
+
+  let preservedPath: string | undefined;
+  if (projectionHash(current) !== lastPublishedHash) {
+    const conflict = safeTarget(
+      vaultRoot,
+      path.join(
+        'Inbox',
+        'Conflicts',
+        `${Date.now()}-retired-${path.basename(relativePath)}`,
+      ),
+    );
+    await mkdir(path.dirname(conflict), { recursive: true });
+    await writeFile(conflict, current, 'utf8');
+    preservedPath = conflict;
+  }
+  await unlink(target);
+  return { removed: true, ...(preservedPath ? { preservedPath } : {}) };
 }

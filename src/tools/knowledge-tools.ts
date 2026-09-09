@@ -15,11 +15,15 @@ export function registerKnowledgeTools(
   server.registerTool(
     'get_project_snapshot',
     {
+      description:
+        'Return a compact, immutable project snapshot. Normally omit maxTokens to use the 800-token default; explicit values must be between 100 and 1600.',
       inputSchema: {
         projectKey,
         worktreePath: z.string(),
         taskId: z.string().optional(),
-        maxTokens: maxTokens(800, 1600),
+        maxTokens: maxTokens(800, 1600).describe(
+          'Compact snapshot response budget: default 800 tokens, maximum 1600.',
+        ),
       },
     },
     async (input) =>
@@ -100,18 +104,20 @@ export function registerKnowledgeTools(
   server.registerTool(
     'get_project_sync_status',
     {
+      description: 'Call first for compact sync status and repair actions.',
       inputSchema: {
         projectKey,
         worktreeIds: z.array(z.string().uuid()).max(20).optional(),
         filters,
         changedOnly: z.boolean().default(true),
+        compact: z.boolean().default(true),
       },
     },
     async (input) =>
       runTool(
         () => knowledge.getProjectSyncStatus(input),
         (data) =>
-          `${data.queues.pending} pending and ${data.queues.failed} failed sync job(s)`,
+          `${data.sourceFreshness}; ${data.topSuggestedActions?.length ?? 0} action(s), ${data.queues.pending} pending, ${data.queues.failed} failed${data.cacheKey ? `; cache ${data.cacheKey}` : ''}`,
       ),
   );
 }

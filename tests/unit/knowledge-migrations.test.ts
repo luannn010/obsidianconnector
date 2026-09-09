@@ -30,6 +30,8 @@ describe('project knowledge migrations', () => {
       'file_activity_events',
       'task_file_rollups',
       'documentation_freshness',
+      'domain_path_rules',
+      'domain_sync_states',
     ]) {
       expect(sql).toContain(`project_knowledge.${table}`);
     }
@@ -44,12 +46,15 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('note_projections_output_path');
     expect(sql).toContain('file_activity_events_dedupe');
     expect(sql).toContain('documentation_freshness_lookup');
+    expect(sql).toContain('domain_sync_states_lookup');
+    expect(sql).toContain('dirty_paths text[]');
+    expect(sql).toContain('source_snapshot_id');
     expect(sql).toContain('projection_conflicts_one_unresolved_drift');
     expect(sql).toContain('knowledge_version_id');
     expect(sql).toContain('locator_type');
     expect(sql).toContain('parser_revision');
     expect(knowledgeMigrations.at(-1)?.id).toBe(
-      '0004_projection_conflict_deduplication',
+      '0005_domain_sync_auditing',
     );
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {

@@ -195,6 +195,8 @@ npm run knowledge:worker
 
 The worker fingerprints branch, HEAD, porcelain status, and dirty state. It reuses an active immutable snapshot when these match, or indexes only changed/renamed/deleted files. Canonical knowledge writes synchronously update version history and BM25 content, then queue embedding and Markdown projection work. Embedding failure leaves exact and BM25 retrieval available.
 
+`get_project_sync_status` defaults to a compact, changed-only audit. It returns bounded summary counts, the highest-priority issues, dependency-ordered repair actions, cost estimates, and a fingerprint-backed cache key. A clean result ends the sync without retrieval; use `compact: false` only for deep troubleshooting. The worker uses the same status-first plan, blocks automatic repair when failed jobs exist unless `PROJECT_KNOWLEDGE_ALLOW_FAILED_REPAIR=true`, and leaves projection publishing in the worker lifecycle.
+
 The optional local retrieval service uses `BAAI/bge-small-en-v1.5` with 384-dimensional vectors and `cross-encoder/ms-marco-MiniLM-L-6-v2` for reranking. Start it with a private Bearer token, then configure the connector's embedding and reranker tokens with the same value when both clients use this service:
 
 ```powershell

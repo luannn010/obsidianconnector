@@ -11,6 +11,7 @@ import {
 import type {
   ContextHit,
   ContextResults,
+  Freshness,
   ExpandProjectContextInput,
   KnowledgeChange,
   KnowledgeStore,
@@ -18,6 +19,8 @@ import type {
   ProjectSnapshot,
   ProjectSnapshotInput,
   ProjectSyncStatus,
+  SyncStatusSummary,
+  SyncSuggestedAction,
   SearchProjectContextInput,
   SyncStatusInput,
   WriteProjectKnowledgeInput,
@@ -61,6 +64,7 @@ interface SnapshotRow extends QueryResultRow {
   head_commit: string;
   snapshot_head: string;
   state: string;
+  parser_revision: string | null;
 }
 interface ChunkRow extends QueryResultRow {
   id: string;
@@ -130,6 +134,149 @@ function asKnowledgeError(error: unknown): KnowledgeError {
         : {}),
     },
   );
+}
+
+interface DomainSyncRow extends QueryResultRow {
+  worktree_id: string;
+  worktree_path: string;
+  branch: string;
+  current_commit: string;
+  current_dirty_hash: string | null;
+  indexed_commit: string | null;
+  indexed_dirty_hash: string | null;
+  snapshot_id: string | null;
+  domain: string;
+  note_path: string;
+  state: 'current' | 'stale' | 'possibly_stale' | 'unverified' | 'missing';
+  last_synced_commit: string | null;
+  last_synced_dirty_hash: string | null;
+  database_revision: number;
+  projection_revision: number | null;
+  reasons: string[];
+  changed_paths: string[];
+  evidence_refs: string[];
+  unmapped_paths: string[];
+}
+interface SyncEvidenceLookupRow extends QueryResultRow {
+  source_path: string;
+  item_id: string;
+  stable_key: string;
+  title: string;
+}
+
+interface SyncStatusCacheEntry {
+  expiresAt: number;
+  cacheKey: string;
+  fingerprint: string;
+  summary: SyncStatusSummary;
+  topIssues: string[];
+  topSuggestedActions: SyncSuggestedAction[];
+}
+
+const syncStatusCache = new Map<string, SyncStatusCacheEntry>();
+const SYNC_STATUS_CACHE_TTL_MS = 5 * 60_000;
+const COMPACT_STATUS_LIMITS = {
+  snapshots: 3,
+  projections: 10,
+  conflicts: 10,
+  tasks: 10,
+  snapshotPaths: 8,
+  domains: 5,
+  reasons: 3,
+  domainPaths: 8,
+  domainEvidenceRefs: 8,
+  unmappedChanges: 8,
+  actionPaths: 12,
+  actionItems: 8,
+  evidenceRefs: 8,
+} as const;
+
+function tokenEstimate(values: {
+  pathCount: number;
+  itemCount: number;
+}): number {
+  const base = 24;
+  return base + values.pathCount * 90 + values.itemCount * 80;
+}
+
+function compactSuggestedAction(
+  action: SyncSuggestedAction,
+): SyncSuggestedAction {
+  const changedPaths = action.changedPaths.slice(
+    0,
+    COMPACT_STATUS_LIMITS.actionPaths,
+  );
+  const relatedItemIds = action.relatedItemIds?.slice(
+    0,
+    COMPACT_STATUS_LIMITS.actionItems,
+  );
+  const evidenceRefs = action.evidenceRefs?.slice(
+    0,
+    COMPACT_STATUS_LIMITS.evidenceRefs,
+  );
+  const omitted = {
+    ...(action.changedPaths.length > changedPaths.length
+      ? { changedPaths: action.changedPaths.length - changedPaths.length }
+      : {}),
+    ...(action.relatedItemIds &&
+    action.relatedItemIds.length > (relatedItemIds?.length ?? 0)
+      ? {
+          relatedItemIds:
+            action.relatedItemIds.length - (relatedItemIds?.length ?? 0),
+        }
+      : {}),
+    ...(action.evidenceRefs &&
+    action.evidenceRefs.length > (evidenceRefs?.length ?? 0)
+      ? {
+          evidenceRefs:
+            action.evidenceRefs.length - (evidenceRefs?.length ?? 0),
+        }
+      : {}),
+  };
+  return {
+    ...action,
+    changedPaths,
+    ...(relatedItemIds?.length ? { relatedItemIds } : {}),
+    ...(evidenceRefs?.length ? { evidenceRefs } : {}),
+    ...(Object.keys(omitted).length ? { omitted } : {}),
+  };
+}
+
+function buildSyncCacheKey(parts: {
+  branch: string | null;
+  head: string;
+  dirtyHash: string;
+  worktreeFingerprint: string;
+  snapshotParserRevision: string;
+  domainRuleFingerprint: string;
+  dbRevision: number;
+  evidenceVersion: string;
+  mappingVersion: string;
+}): { fingerprint: string; cacheKey: string } {
+  const fingerprint = [
+    parts.branch ?? 'unknown',
+    parts.head,
+    parts.dirtyHash || 'clean',
+    `worktrees:${parts.worktreeFingerprint}`,
+    parts.snapshotParserRevision,
+    parts.domainRuleFingerprint,
+    `db:${parts.dbRevision}`,
+    `evidence:${parts.evidenceVersion}`,
+    `mappings:${parts.mappingVersion}`,
+  ].join('|');
+  const cacheKey = createHash('sha256')
+    .update(fingerprint)
+    .digest('hex')
+    .slice(0, 16);
+  return { fingerprint, cacheKey };
+}
+
+function toActionId(
+  action: SyncSuggestedAction['action'],
+  worktreeId: string,
+  domain?: string,
+): string {
+  return `${action}:${worktreeId}${domain ? `:${domain}` : ''}`;
 }
 
 function hitFromChunk(row: ChunkRow, full = false): ContextHit {
@@ -1010,6 +1157,9 @@ export class PgKnowledgeStore implements KnowledgeStore {
     input: SyncStatusInput,
   ): Promise<ProjectSyncStatus> {
     try {
+      const compact = input.compact ?? true;
+      const issueLimit = Math.max(1, Math.min(20, input.issueLimit ?? 10));
+      const actionLimit = Math.max(1, Math.min(20, input.actionLimit ?? 10));
       const project = await this.pool.query<ProjectRow>(
         'SELECT project_id, db_revision FROM project_knowledge.projects WHERE project_key=$1',
         [input.projectKey],
@@ -1021,36 +1171,59 @@ export class PgKnowledgeStore implements KnowledgeStore {
           'Project is not registered',
           false,
         );
-      const [snapshots, projections, queues, conflicts, freshness, tasks] =
-        await Promise.all([
-          this.pool.query(
-            `SELECT w.id AS worktree_id,w.path,w.branch,w.head_commit,w.dirty_hash,w.registered,
-             s.id AS snapshot_id,s.head_commit AS snapshot_head,s.dirty_hash AS snapshot_dirty_hash,
+      const [
+        snapshots,
+        projections,
+        queues,
+        conflicts,
+        freshness,
+        tasks,
+        domainStates,
+        syncRules,
+        mappingAndEvidence,
+      ] = await Promise.all([
+        this.pool.query<{
+          worktree_id: string;
+          path: string;
+          branch: string;
+          head_commit: string;
+          dirty_hash: string | null;
+          dirty_paths: string[];
+          registered: boolean;
+          snapshot_id: string;
+          snapshot_head: string;
+          snapshot_dirty_hash: string | null;
+          parser_revision: string | null;
+          freshness: Freshness;
+        }>(
+          `SELECT w.id AS worktree_id,w.path,w.branch,w.head_commit,w.dirty_hash,w.dirty_paths,w.registered,
+             s.id AS snapshot_id,s.head_commit AS snapshot_head,s.dirty_hash AS snapshot_dirty_hash,s.parser_revision,
              CASE WHEN s.id IS NOT NULL AND s.head_commit=w.head_commit
                AND s.dirty_hash IS NOT DISTINCT FROM w.dirty_hash THEN 'current' ELSE 'stale' END AS freshness
            FROM project_knowledge.worktrees w
            LEFT JOIN LATERAL (
-             SELECT id,head_commit,dirty_hash FROM project_knowledge.source_snapshots
-             WHERE worktree_id=w.id AND state='active' ORDER BY activated_at DESC NULLS LAST LIMIT 1
+             SELECT id,head_commit,dirty_hash,parser_revision FROM project_knowledge.source_snapshots
+             WHERE worktree_id=w.id AND state='active'
+             ORDER BY activated_at DESC NULLS LAST LIMIT 1
            ) s ON true
            WHERE w.project_id=$1 AND ($2::uuid[] IS NULL OR w.id=ANY($2))
            ORDER BY w.last_seen_at DESC LIMIT 20`,
-            [row.project_id, input.worktreeIds ?? null],
-          ),
-          this.pool.query(
-            "SELECT view_id,relative_path,db_revision,state,updated_at,error_message FROM project_knowledge.note_projections WHERE project_id=$1 AND ($2::boolean=false OR state<>'current') ORDER BY relative_path",
-            [row.project_id, input.changedOnly],
-          ),
-          this.pool.query<{ state: string; count: number }>(
-            "SELECT state,count(*)::int AS count FROM project_knowledge.outbox_jobs WHERE project_id=$1 AND state IN ('pending','failed') GROUP BY state",
-            [row.project_id],
-          ),
-          this.pool.query(
-            'SELECT id,projection_id,preserved_path,created_at FROM project_knowledge.projection_conflicts WHERE project_id=$1 AND resolved_at IS NULL',
-            [row.project_id],
-          ),
-          this.pool.query<{ state: string; count: number }>(
-            `SELECT freshness.state,count(DISTINCT freshness.item_id)::int AS count
+          [row.project_id, input.worktreeIds ?? null],
+        ),
+        this.pool.query(
+          "SELECT view_id,relative_path,db_revision,state,updated_at,error_message FROM project_knowledge.note_projections WHERE project_id=$1 AND ($2::boolean=false OR state<>'current') ORDER BY relative_path",
+          [row.project_id, input.changedOnly],
+        ),
+        this.pool.query<{ state: string; count: number }>(
+          "SELECT state,count(*)::int AS count FROM project_knowledge.outbox_jobs WHERE project_id=$1 AND state IN ('pending','failed') GROUP BY state",
+          [row.project_id],
+        ),
+        this.pool.query(
+          'SELECT id,projection_id,preserved_path,created_at FROM project_knowledge.projection_conflicts WHERE project_id=$1 AND resolved_at IS NULL',
+          [row.project_id],
+        ),
+        this.pool.query<{ state: string; count: number }>(
+          `SELECT freshness.state,count(DISTINCT freshness.item_id)::int AS count
            FROM project_knowledge.documentation_freshness freshness
            JOIN project_knowledge.source_snapshots snapshot
              ON snapshot.id=freshness.snapshot_id AND snapshot.state='active'
@@ -1058,14 +1231,14 @@ export class PgKnowledgeStore implements KnowledgeStore {
              AND ($2::uuid[] IS NULL OR freshness.worktree_id=ANY($2))
              AND ($3::text[] IS NULL OR freshness.state=ANY($3))
            GROUP BY freshness.state`,
-            [
-              row.project_id,
-              input.worktreeIds ?? null,
-              input.filters?.documentation ?? null,
-            ],
-          ),
-          this.pool.query(
-            `SELECT t.agent,t.external_task_id AS task_id,t.task_name,t.status,t.worktree_id,
+          [
+            row.project_id,
+            input.worktreeIds ?? null,
+            input.filters?.documentation ?? null,
+          ],
+        ),
+        this.pool.query(
+          `SELECT t.agent,t.external_task_id AS task_id,t.task_name,t.status,t.worktree_id,
              w.branch,w.head_commit,t.started_at,t.last_seen_at
            FROM project_knowledge.agent_tasks t
            LEFT JOIN project_knowledge.worktrees w ON w.id=t.worktree_id
@@ -1073,36 +1246,668 @@ export class PgKnowledgeStore implements KnowledgeStore {
              AND ($2::uuid[] IS NULL OR t.worktree_id=ANY($2))
              AND ($3::text[] IS NULL OR t.external_task_id=ANY($3))
            ORDER BY t.last_seen_at DESC LIMIT 50`,
-            [
-              row.project_id,
-              input.worktreeIds ?? null,
-              input.filters?.tasks ?? null,
-            ],
-          ),
-        ]);
-      const counts = new Map(
+          [
+            row.project_id,
+            input.worktreeIds ?? null,
+            input.filters?.tasks ?? null,
+          ],
+        ),
+        this.pool.query<DomainSyncRow>(
+          `SELECT sync.worktree_id,w.path AS worktree_path,w.branch,
+               sync.current_commit,sync.current_dirty_hash,sync.indexed_commit,
+               sync.indexed_dirty_hash,sync.source_snapshot_id AS snapshot_id,
+               domain.name AS domain,sync.note_path,sync.state,
+               sync.last_synced_commit,sync.last_synced_dirty_hash,
+               sync.database_revision,sync.projection_revision,sync.reasons,
+               sync.changed_paths,sync.evidence_refs,sync.unmapped_paths
+             FROM project_knowledge.domain_sync_states sync
+             JOIN project_knowledge.domains domain ON domain.id=sync.domain_id
+             JOIN project_knowledge.worktrees w ON w.id=sync.worktree_id
+             WHERE sync.project_id=$1
+               AND ($2::uuid[] IS NULL OR sync.worktree_id=ANY($2))
+             ORDER BY w.last_seen_at DESC,domain.name`,
+          [row.project_id, input.worktreeIds ?? null],
+        ),
+        this.pool.query<{
+          rule_count: number;
+          rule_fingerprint: string | null;
+        }>(
+          `SELECT COUNT(*)::int AS rule_count,MAX(updated_at)::text AS rule_fingerprint
+             FROM project_knowledge.domain_path_rules
+             WHERE project_id=$1`,
+          [row.project_id],
+        ),
+        this.pool.query<{
+          evidence_count: number;
+          mapping_count: number;
+          evidence_version: string | null;
+          mapping_version: string | null;
+        }>(
+          `SELECT
+               (SELECT COUNT(*)::int FROM project_knowledge.source_evidence WHERE project_id=$1) AS evidence_count,
+               (SELECT MAX(id)::text FROM project_knowledge.source_evidence WHERE project_id=$1) AS evidence_version,
+               (SELECT COUNT(*)::int FROM project_knowledge.physical_mappings WHERE project_id=$1) AS mapping_count,
+               (SELECT MAX(id)::text FROM project_knowledge.physical_mappings WHERE project_id=$1) AS mapping_version`,
+          [row.project_id],
+        ),
+      ]);
+      const queueCounts = new Map(
         queues.rows.map((entry) => [entry.state, Number(entry.count)]),
       );
-      return {
+      const domainRows = domainStates.rows;
+      const allUnmappedChanges = [
+        ...new Set(domainRows.flatMap((candidate) => candidate.unmapped_paths)),
+      ].sort();
+      const staleSources = snapshots.rows.filter(
+        (candidate) => candidate.freshness !== 'current',
+      ).length;
+      const staleEvidence = freshness.rows
+        .filter((candidate) => candidate.state !== 'current')
+        .reduce((total, current) => total + Number(current.count), 0);
+      const staleProjections = projections.rows.filter(
+        (candidate) => candidate.state !== 'current',
+      ).length;
+      const dirtyWorktrees = snapshots.rows.filter(
+        (candidate) =>
+          candidate.dirty_hash !== null && candidate.dirty_hash !== '',
+      ).length;
+      const summary: SyncStatusSummary = {
+        dirtyWorktrees,
+        staleSources,
+        staleEvidence,
+        staleProjections,
+        pendingJobs: queueCounts.get('pending') ?? 0,
+        failedJobs: queueCounts.get('failed') ?? 0,
+      };
+
+      const sourceFreshness: Freshness =
+        staleSources ||
+        allUnmappedChanges.length ||
+        staleEvidence ||
+        staleProjections ||
+        dirtyWorktrees ||
+        summary.pendingJobs ||
+        summary.failedJobs
+          ? 'stale'
+          : 'current';
+
+      const selectedWorktreeId =
+        input.worktreeIds?.[0] ??
+        snapshots.rows[0]?.worktree_id ??
+        domainRows[0]?.worktree_id;
+      const selectedDomains = selectedWorktreeId
+        ? domainRows.filter(
+            (candidate) => candidate.worktree_id === selectedWorktreeId,
+          )
+        : [];
+      const worktreeRowsForResponse = input.changedOnly
+        ? selectedDomains.filter((candidate) => candidate.state !== 'current')
+        : selectedDomains;
+      const displayedDomainRows = compact
+        ? worktreeRowsForResponse.slice(0, COMPACT_STATUS_LIMITS.domains)
+        : worktreeRowsForResponse;
+      const selectedUnmappedChanges = [
+        ...new Set(
+          selectedDomains.flatMap((candidate) => candidate.unmapped_paths),
+        ),
+      ].sort();
+      const projectUnmappedChanges = compact
+        ? allUnmappedChanges
+        : selectedUnmappedChanges;
+      const displayedUnmappedChanges = compact
+        ? projectUnmappedChanges.slice(0, COMPACT_STATUS_LIMITS.unmappedChanges)
+        : projectUnmappedChanges;
+      const omittedDomainDetails = compact
+        ? {
+            ...(worktreeRowsForResponse.length > displayedDomainRows.length
+              ? {
+                  domains:
+                    worktreeRowsForResponse.length - displayedDomainRows.length,
+                }
+              : {}),
+            ...(() => {
+              const total = worktreeRowsForResponse.reduce(
+                (count, domain) => count + domain.reasons.length,
+                0,
+              );
+              const shown = displayedDomainRows.reduce(
+                (count, domain) =>
+                  count +
+                  Math.min(
+                    domain.reasons.length,
+                    COMPACT_STATUS_LIMITS.reasons,
+                  ),
+                0,
+              );
+              return total > shown ? { reasons: total - shown } : {};
+            })(),
+            ...(() => {
+              const total = worktreeRowsForResponse.reduce(
+                (count, domain) => count + domain.changed_paths.length,
+                0,
+              );
+              const shown = displayedDomainRows.reduce(
+                (count, domain) =>
+                  count +
+                  Math.min(
+                    domain.changed_paths.length,
+                    COMPACT_STATUS_LIMITS.domainPaths,
+                  ),
+                0,
+              );
+              return total > shown ? { changedPaths: total - shown } : {};
+            })(),
+            ...(() => {
+              const total = worktreeRowsForResponse.reduce(
+                (count, domain) => count + domain.evidence_refs.length,
+                0,
+              );
+              const shown = displayedDomainRows.reduce(
+                (count, domain) =>
+                  count +
+                  Math.min(
+                    domain.evidence_refs.length,
+                    COMPACT_STATUS_LIMITS.domainEvidenceRefs,
+                  ),
+                0,
+              );
+              return total > shown ? { evidenceRefs: total - shown } : {};
+            })(),
+            ...(projectUnmappedChanges.length > displayedUnmappedChanges.length
+              ? {
+                  unmappedChanges:
+                    projectUnmappedChanges.length -
+                    displayedUnmappedChanges.length,
+                }
+              : {}),
+          }
+        : {};
+      const sampleDomainRow =
+        displayedDomainRows[0] ?? selectedDomains[0] ?? domainRows[0];
+      const domainSync = sampleDomainRow
+        ? {
+            worktreeId: sampleDomainRow.worktree_id,
+            worktreePath: sampleDomainRow.worktree_path,
+            branch: sampleDomainRow.branch,
+            currentCommit: sampleDomainRow.current_commit,
+            ...(sampleDomainRow.current_dirty_hash
+              ? { currentDirtyHash: sampleDomainRow.current_dirty_hash }
+              : {}),
+            ...(sampleDomainRow.indexed_commit
+              ? { indexedCommit: sampleDomainRow.indexed_commit }
+              : {}),
+            ...(sampleDomainRow.indexed_dirty_hash
+              ? { indexedDirtyHash: sampleDomainRow.indexed_dirty_hash }
+              : {}),
+            ...(sampleDomainRow.snapshot_id
+              ? { snapshotId: sampleDomainRow.snapshot_id }
+              : {}),
+            domains: displayedDomainRows.map((domain) => ({
+              name: domain.domain,
+              notePath: domain.note_path,
+              state: domain.state,
+              ...(domain.last_synced_commit
+                ? { lastSyncedCommit: domain.last_synced_commit }
+                : {}),
+              ...(domain.last_synced_dirty_hash
+                ? { lastSyncedDirtyHash: domain.last_synced_dirty_hash }
+                : {}),
+              currentCommit: domain.current_commit,
+              ...(domain.current_dirty_hash
+                ? { currentDirtyHash: domain.current_dirty_hash }
+                : {}),
+              databaseRevision: Number(domain.database_revision),
+              ...(domain.projection_revision !== null
+                ? { projectionRevision: Number(domain.projection_revision) }
+                : {}),
+              reasons: compact
+                ? domain.reasons.slice(0, COMPACT_STATUS_LIMITS.reasons)
+                : domain.reasons,
+              changedPaths: compact
+                ? domain.changed_paths.slice(
+                    0,
+                    COMPACT_STATUS_LIMITS.domainPaths,
+                  )
+                : domain.changed_paths,
+              evidenceRefs: compact
+                ? domain.evidence_refs.slice(
+                    0,
+                    COMPACT_STATUS_LIMITS.domainEvidenceRefs,
+                  )
+                : domain.evidence_refs,
+            })),
+            unmappedChanges: displayedUnmappedChanges,
+            ...(Object.keys(omittedDomainDetails).length
+              ? { omitted: omittedDomainDetails }
+              : {}),
+          }
+        : undefined;
+
+      const selectedSnapshot = snapshots.rows[0];
+      const worktreeFingerprint = createHash('sha256')
+        .update(
+          snapshots.rows
+            .map((snapshot) =>
+              [
+                snapshot.worktree_id,
+                snapshot.branch,
+                snapshot.head_commit,
+                snapshot.dirty_hash ?? 'clean',
+                snapshot.parser_revision ?? 'legacy',
+              ].join(':'),
+            )
+            .sort()
+            .join('|'),
+        )
+        .digest('hex')
+        .slice(0, 16);
+      const cacheSeed = buildSyncCacheKey({
+        branch: selectedSnapshot?.branch ?? null,
+        head: selectedSnapshot?.head_commit ?? 'untracked',
+        dirtyHash: selectedSnapshot?.dirty_hash ?? 'clean',
+        worktreeFingerprint,
+        snapshotParserRevision: selectedSnapshot?.parser_revision ?? 'legacy',
+        domainRuleFingerprint: `${syncRules.rows[0]?.rule_count ?? 0}:${syncRules.rows[0]?.rule_fingerprint ?? 'none'}`,
+        dbRevision: Number(row.db_revision),
+        evidenceVersion: `${mappingAndEvidence.rows[0]?.evidence_count ?? 0}:${mappingAndEvidence.rows[0]?.evidence_version ?? 'none'}`,
+        mappingVersion: `${mappingAndEvidence.rows[0]?.mapping_count ?? 0}:${mappingAndEvidence.rows[0]?.mapping_version ?? 'none'}`,
+      });
+      const cacheKey = `${input.projectKey}|${cacheSeed.cacheKey}|${compact ? 1 : 0}|${input.changedOnly ? 1 : 0}|${issueLimit}|${actionLimit}|${[...(input.worktreeIds ?? [])].sort().join(',')}`;
+      const cached = compact ? syncStatusCache.get(cacheKey) : undefined;
+      const cacheFresh = Boolean(
+        compact &&
+        cached &&
+        cached.fingerprint === cacheSeed.fingerprint &&
+        cached.cacheKey === cacheSeed.cacheKey &&
+        cached.expiresAt > Date.now(),
+      );
+
+      let topIssues: string[];
+      let topSuggestedActions: SyncSuggestedAction[];
+      if (cacheFresh && cached) {
+        topIssues = cached.topIssues;
+        topSuggestedActions = cached.topSuggestedActions;
+      } else {
+        const issueSeeds: string[] = [];
+        if (summary.failedJobs > 0)
+          issueSeeds.push(
+            `${summary.failedJobs} failed sync job(s) require manual review`,
+          );
+        if (summary.pendingJobs > 0)
+          issueSeeds.push(
+            `${summary.pendingJobs} pending sync job(s) have not completed`,
+          );
+        if (summary.staleEvidence > 0)
+          issueSeeds.push(
+            `${summary.staleEvidence} stale or missing evidence references`,
+          );
+        if (summary.staleSources > 0)
+          issueSeeds.push(
+            `${summary.staleSources} source snapshot(s) are stale`,
+          );
+        if (allUnmappedChanges.length)
+          issueSeeds.push(
+            `${allUnmappedChanges.length} changed files are not mapped to a domain`,
+          );
+        if (summary.staleProjections > 0)
+          issueSeeds.push(
+            `${summary.staleProjections} projection entries are not current`,
+          );
+
+        const changedPathCandidates = new Set<string>();
+        for (const candidate of domainRows) {
+          if (candidate.state !== 'current')
+            for (const path of candidate.changed_paths)
+              changedPathCandidates.add(path);
+          for (const path of candidate.unmapped_paths)
+            changedPathCandidates.add(path);
+        }
+        for (const snapshot of snapshots.rows)
+          if (snapshot.freshness !== 'current')
+            for (const path of snapshot.dirty_paths ?? [])
+              changedPathCandidates.add(path);
+
+        const evidenceLookup = changedPathCandidates.size
+          ? (
+              await this.pool.query<SyncEvidenceLookupRow>(
+                `SELECT evidence.source_path,evidence.item_id,item.stable_key,item.title
+                 FROM project_knowledge.source_evidence evidence
+                 JOIN project_knowledge.knowledge_items item ON item.id=evidence.item_id
+                 WHERE evidence.project_id=$1 AND evidence.source_path=ANY($2::text[])`,
+                [row.project_id, [...changedPathCandidates]],
+              )
+            ).rows
+          : [];
+        const pathToItemIds = new Map<string, string[]>();
+        for (const match of evidenceLookup) {
+          const prior = pathToItemIds.get(match.source_path) ?? [];
+          pathToItemIds.set(match.source_path, [
+            ...new Set([...prior, match.item_id]),
+          ]);
+        }
+
+        const pathActions = new Map<string, SyncSuggestedAction>();
+        for (const domain of domainRows) {
+          const changedPaths = [...new Set(domain.changed_paths)].sort();
+          const evidenceRefs = [...new Set(domain.evidence_refs)].sort();
+          if (changedPaths.length > 0) {
+            const reindexActionId = toActionId(
+              'REINDEX_SOURCE',
+              domain.worktree_id,
+              domain.domain,
+            );
+            if (!pathActions.has(reindexActionId)) {
+              const relatedItemIds = [
+                ...new Set(
+                  changedPaths.flatMap((path) => pathToItemIds.get(path) ?? []),
+                ),
+              ];
+              pathActions.set(reindexActionId, {
+                actionId: reindexActionId,
+                action: 'REINDEX_SOURCE',
+                summary: `Reindex changed source paths for ${domain.domain}`,
+                worktreeId: domain.worktree_id,
+                worktreePath: domain.worktree_path,
+                domain: domain.domain,
+                changedPaths,
+                ...(relatedItemIds.length ? { relatedItemIds } : {}),
+                estimatedWrites: changedPaths.length,
+                estimatedTokens: tokenEstimate({
+                  pathCount: changedPaths.length,
+                  itemCount: relatedItemIds.length,
+                }),
+              });
+            }
+          }
+
+          if (domain.unmapped_paths.length > 0) {
+            const unmappedActionId = toActionId(
+              'REINDEX_SOURCE',
+              domain.worktree_id,
+              `${domain.domain}:unmapped`,
+            );
+            if (!pathActions.has(unmappedActionId)) {
+              const relatedItemIds = [
+                ...new Set(
+                  domain.unmapped_paths.flatMap(
+                    (path) => pathToItemIds.get(path) ?? [],
+                  ),
+                ),
+              ];
+              pathActions.set(unmappedActionId, {
+                actionId: unmappedActionId,
+                action: 'REINDEX_SOURCE',
+                summary: `Resolve unmapped source paths for ${domain.domain}`,
+                worktreeId: domain.worktree_id,
+                worktreePath: domain.worktree_path,
+                domain: domain.domain,
+                changedPaths: [...new Set(domain.unmapped_paths)],
+                ...(relatedItemIds.length ? { relatedItemIds } : {}),
+                estimatedWrites: domain.unmapped_paths.length,
+                estimatedTokens: tokenEstimate({
+                  pathCount: domain.unmapped_paths.length,
+                  itemCount: relatedItemIds.length,
+                }),
+              });
+            }
+          }
+
+          const hasChanged = changedPaths.length > 0;
+          const projectionLag =
+            domain.projection_revision !== null &&
+            domain.projection_revision < domain.database_revision;
+          if (domain.state === 'stale' && hasChanged) {
+            const actionId = toActionId(
+              'UPDATE_KNOWLEDGE',
+              domain.worktree_id,
+              domain.domain,
+            );
+            const relatedItemIds = [
+              ...new Set(
+                changedPaths.flatMap((path) => pathToItemIds.get(path) ?? []),
+              ),
+            ];
+            pathActions.set(actionId, {
+              actionId,
+              action: 'UPDATE_KNOWLEDGE',
+              summary: `Rewrite documentation for ${domain.domain}`,
+              worktreeId: domain.worktree_id,
+              worktreePath: domain.worktree_path,
+              domain: domain.domain,
+              changedPaths,
+              ...(relatedItemIds.length ? { relatedItemIds } : {}),
+              ...(evidenceRefs.length ? { evidenceRefs } : {}),
+              estimatedWrites: Math.max(1, changedPaths.length),
+              estimatedTokens: tokenEstimate({
+                pathCount: changedPaths.length,
+                itemCount: relatedItemIds.length,
+              }),
+              dependsOn: [
+                toActionId('REINDEX_SOURCE', domain.worktree_id, domain.domain),
+              ],
+            });
+            continue;
+          }
+          if (
+            domain.state === 'missing' ||
+            domain.state === 'unverified' ||
+            domain.state === 'possibly_stale' ||
+            (domain.state === 'stale' &&
+              domain.reasons.some((reason) =>
+                /evidence|authoritative ref/iu.test(reason),
+              ))
+          ) {
+            const verifyActionId = toActionId(
+              'VERIFY_EVIDENCE',
+              domain.worktree_id,
+              domain.domain,
+            );
+            const targetPaths = [
+              ...new Set([...changedPaths, ...domain.unmapped_paths]),
+            ];
+            const relatedItemIds = [
+              ...new Set(
+                targetPaths.flatMap((path) => pathToItemIds.get(path) ?? []),
+              ),
+            ];
+            pathActions.set(verifyActionId, {
+              actionId: verifyActionId,
+              action: 'VERIFY_EVIDENCE',
+              summary: `Verify evidence for ${domain.domain}`,
+              worktreeId: domain.worktree_id,
+              worktreePath: domain.worktree_path,
+              domain: domain.domain,
+              changedPaths: targetPaths,
+              ...(relatedItemIds.length ? { relatedItemIds } : {}),
+              ...(evidenceRefs.length ? { evidenceRefs } : {}),
+              estimatedWrites: Math.max(
+                1,
+                relatedItemIds.length,
+                evidenceRefs.length,
+              ),
+              estimatedTokens: tokenEstimate({
+                pathCount: targetPaths.length,
+                itemCount: Math.max(relatedItemIds.length, evidenceRefs.length),
+              }),
+              dependsOn: hasChanged
+                ? [
+                    toActionId(
+                      'REINDEX_SOURCE',
+                      domain.worktree_id,
+                      domain.domain,
+                    ),
+                  ]
+                : undefined,
+            });
+            continue;
+          }
+          if (
+            projectionLag &&
+            !hasChanged &&
+            domain.reasons.every((reason) =>
+              /projection|canonical knowledge/iu.test(reason),
+            )
+          ) {
+            const finalizeActionId = toActionId(
+              'FINALIZE_PROJECTION',
+              domain.worktree_id,
+              domain.domain,
+            );
+            pathActions.set(finalizeActionId, {
+              actionId: finalizeActionId,
+              action: 'FINALIZE_PROJECTION',
+              summary: `Finalize projection for ${domain.domain}`,
+              worktreeId: domain.worktree_id,
+              worktreePath: domain.worktree_path,
+              domain: domain.domain,
+              changedPaths: [],
+              estimatedWrites: 1,
+              estimatedTokens: 180,
+            });
+          }
+        }
+
+        for (const snapshot of snapshots.rows) {
+          if (snapshot.freshness === 'current') continue;
+          const fallbackActionId = toActionId(
+            'REINDEX_SOURCE',
+            snapshot.worktree_id,
+            'source',
+          );
+          if (
+            [...pathActions.values()].some(
+              (candidate) =>
+                candidate.action === 'REINDEX_SOURCE' &&
+                candidate.worktreeId === snapshot.worktree_id,
+            )
+          )
+            continue;
+          const changedPaths = [...new Set(snapshot.dirty_paths ?? [])].sort();
+          const relatedItemIds = [
+            ...new Set(
+              changedPaths.flatMap(
+                (sourcePath) => pathToItemIds.get(sourcePath) ?? [],
+              ),
+            ),
+          ];
+          pathActions.set(fallbackActionId, {
+            actionId: fallbackActionId,
+            action: 'REINDEX_SOURCE',
+            summary: `Refresh stale source snapshot for ${snapshot.branch}`,
+            worktreeId: snapshot.worktree_id,
+            worktreePath: snapshot.path,
+            changedPaths,
+            ...(relatedItemIds.length ? { relatedItemIds } : {}),
+            estimatedWrites: Math.max(1, changedPaths.length),
+            estimatedTokens: tokenEstimate({
+              pathCount: changedPaths.length,
+              itemCount: relatedItemIds.length,
+            }),
+          });
+        }
+
+        if (
+          summary.pendingJobs > 0 &&
+          ![...pathActions.values()].some(
+            (candidate) => candidate.action === 'FINALIZE_PROJECTION',
+          )
+        ) {
+          const worktreeId = selectedSnapshot?.worktree_id ?? row.project_id;
+          const finalizeActionId = toActionId(
+            'FINALIZE_PROJECTION',
+            worktreeId,
+            'pending-jobs',
+          );
+          pathActions.set(finalizeActionId, {
+            actionId: finalizeActionId,
+            action: 'FINALIZE_PROJECTION',
+            summary: `Process ${summary.pendingJobs} pending worker job(s)`,
+            worktreeId,
+            ...(selectedSnapshot?.path
+              ? { worktreePath: selectedSnapshot.path }
+              : {}),
+            changedPaths: [],
+            estimatedWrites: summary.pendingJobs,
+            estimatedTokens: 180,
+          });
+        }
+
+        const actionPriority: Record<SyncSuggestedAction['action'], number> = {
+          REINDEX_SOURCE: 0,
+          UPDATE_KNOWLEDGE: 1,
+          VERIFY_EVIDENCE: 2,
+          FINALIZE_PROJECTION: 3,
+        };
+        topSuggestedActions = [...pathActions.values()]
+          .sort((left, right) =>
+            actionPriority[left.action] === actionPriority[right.action]
+              ? (left.domain ?? '').localeCompare(right.domain ?? '') ||
+                left.worktreeId.localeCompare(right.worktreeId)
+              : actionPriority[left.action] - actionPriority[right.action],
+          )
+          .slice(0, actionLimit);
+        topIssues = issueSeeds.slice(0, issueLimit);
+        syncStatusCache.set(cacheKey, {
+          expiresAt: Date.now() + SYNC_STATUS_CACHE_TTL_MS,
+          cacheKey: cacheSeed.cacheKey,
+          fingerprint: cacheSeed.fingerprint,
+          summary,
+          topIssues,
+          topSuggestedActions,
+        });
+      }
+
+      const response: ProjectSyncStatus = {
         projectKey: input.projectKey,
         dbRevision: Number(row.db_revision),
-        sourceFreshness: snapshots.rows.some(
-          (snapshot) => snapshot.freshness !== 'current',
-        )
-          ? 'stale'
-          : 'current',
-        snapshots: snapshots.rows,
-        projections: projections.rows,
+        sourceFreshness,
+        summary,
+        topIssues,
+        topSuggestedActions: topSuggestedActions
+          .slice(0, actionLimit)
+          .map((action) => (compact ? compactSuggestedAction(action) : action)),
+        cacheKey: cacheSeed.cacheKey,
+        fingerprint: cacheSeed.fingerprint,
+        compact,
+        snapshots: compact
+          ? snapshots.rows
+              .slice(0, COMPACT_STATUS_LIMITS.snapshots)
+              .map((snapshot) => ({
+                ...snapshot,
+                dirty_paths: (snapshot.dirty_paths ?? []).slice(
+                  0,
+                  COMPACT_STATUS_LIMITS.snapshotPaths,
+                ),
+                ...((snapshot.dirty_paths?.length ?? 0) >
+                COMPACT_STATUS_LIMITS.snapshotPaths
+                  ? {
+                      omitted_dirty_paths:
+                        snapshot.dirty_paths.length -
+                        COMPACT_STATUS_LIMITS.snapshotPaths,
+                    }
+                  : {}),
+              }))
+          : snapshots.rows,
+        projections: compact
+          ? projections.rows.slice(0, COMPACT_STATUS_LIMITS.projections)
+          : projections.rows,
         queues: {
-          pending: counts.get('pending') ?? 0,
-          failed: counts.get('failed') ?? 0,
+          pending: queueCounts.get('pending') ?? 0,
+          failed: queueCounts.get('failed') ?? 0,
         },
-        conflicts: conflicts.rows,
+        conflicts: compact
+          ? conflicts.rows.slice(0, COMPACT_STATUS_LIMITS.conflicts)
+          : conflicts.rows,
         documentationFreshness: Object.fromEntries(
           freshness.rows.map((entry) => [entry.state, Number(entry.count)]),
         ),
-        tasks: tasks.rows,
+        tasks: compact
+          ? tasks.rows.slice(0, COMPACT_STATUS_LIMITS.tasks)
+          : tasks.rows,
+        ...(domainSync ? { domainSync } : {}),
       };
+
+      return response;
     } catch (error) {
       throw asKnowledgeError(error);
     }

@@ -85,9 +85,16 @@ describe('standard knowledge MCP profile', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-mcp-'));
     roots.push(root);
     const registry = await VaultRegistry.load(path.join(root, 'config.json'));
+    const knowledge = fakeStore();
+    const snapshotInputs: Array<{ maxTokens: number }> = [];
+    const getProjectSnapshot = knowledge.getProjectSnapshot;
+    knowledge.getProjectSnapshot = async (input) => {
+      snapshotInputs.push({ maxTokens: input.maxTokens });
+      return getProjectSnapshot(input);
+    };
     const server = createServer(registry, {
       profile: 'standard',
-      knowledge: fakeStore(),
+      knowledge,
     });
     const client = new Client(
       { name: 'test', version: '1' },
@@ -109,6 +116,35 @@ describe('standard knowledge MCP profile', () => {
       'write_project_knowledge',
     ]);
     expect(JSON.stringify(tools.tools).length).toBeLessThan(18_000);
+    const snapshotTool = tools.tools.find(
+      (tool) => tool.name === 'get_project_snapshot',
+    );
+    expect(snapshotTool).toMatchObject({
+      description: expect.stringMatching(/omit.*maxTokens/iu),
+      inputSchema: {
+        properties: {
+          maxTokens: {
+            type: 'integer',
+            minimum: 100,
+            maximum: 1600,
+            default: 800,
+            description: expect.stringMatching(/default 800.*maximum 1600/iu),
+          },
+        },
+      },
+    });
+    const statusTool = tools.tools.find(
+      (tool) => tool.name === 'get_project_sync_status',
+    );
+    expect(statusTool).toMatchObject({
+      description: expect.stringMatching(/first.*compact/iu),
+      inputSchema: {
+        properties: {
+          compact: { type: 'boolean', default: true },
+          changedOnly: { type: 'boolean', default: true },
+        },
+      },
+    });
     const adminServer = createServer(registry, { profile: 'admin' });
     const adminClient = new Client(
       { name: 'admin-test', version: '1' },
@@ -122,7 +158,7 @@ describe('standard knowledge MCP profile', () => {
     ]);
     const adminTools = await adminClient.listTools();
     expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(
-      JSON.stringify(adminTools.tools).length * 0.25,
+      JSON.stringify(adminTools.tools).length * 0.27,
     );
     await adminClient.close();
     await adminServer.close();
@@ -135,6 +171,36 @@ describe('standard knowledge MCP profile', () => {
     expect(snapshot.structuredContent).toMatchObject({
       projectKey: 'MC-Platform',
       snapshotId: 'snapshot-1',
+    });
+    expect(snapshotInputs).toEqual([{ maxTokens: 800 }]);
+
+    const maximumSnapshot = await client.callTool({
+      name: 'get_project_snapshot',
+      arguments: {
+        projectKey: 'MC-Platform',
+        worktreePath: 'C:/repo',
+        maxTokens: 1600,
+      },
+    });
+    expect(maximumSnapshot.isError).not.toBe(true);
+    expect(snapshotInputs.at(-1)).toEqual({ maxTokens: 1600 });
+
+    const oversizedSnapshot = await client.callTool({
+      name: 'get_project_snapshot',
+      arguments: {
+        projectKey: 'MC-Platform',
+        worktreePath: 'C:/repo',
+        maxTokens: 1601,
+      },
+    });
+    expect(oversizedSnapshot).toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringMatching(/less than or equal to 1600/iu),
+        },
+      ],
     });
 
     const write = await client.callTool({

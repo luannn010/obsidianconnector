@@ -145,18 +145,94 @@ export interface SyncStatusInput {
   worktreeIds?: string[];
   filters?: Record<string, string[]>;
   changedOnly: boolean;
+  compact?: boolean;
+  issueLimit?: number;
+  actionLimit?: number;
+}
+
+export interface DomainSyncStatus {
+  worktreeId: string;
+  worktreePath: string;
+  branch: string;
+  currentCommit: string;
+  currentDirtyHash?: string;
+  indexedCommit?: string;
+  indexedDirtyHash?: string;
+  snapshotId?: string;
+  domains: Array<{
+    name: string;
+    notePath: string;
+    state: 'current' | 'stale' | 'possibly_stale' | 'unverified' | 'missing';
+    lastSyncedCommit?: string;
+    lastSyncedDirtyHash?: string;
+    currentCommit: string;
+    currentDirtyHash?: string;
+    databaseRevision: number;
+    projectionRevision?: number;
+    reasons: string[];
+    changedPaths: string[];
+    evidenceRefs: string[];
+  }>;
+  unmappedChanges: string[];
+  omitted?: {
+    domains?: number;
+    reasons?: number;
+    changedPaths?: number;
+    evidenceRefs?: number;
+    unmappedChanges?: number;
+  };
+}
+
+export interface SyncStatusSummary {
+  dirtyWorktrees: number;
+  staleSources: number;
+  staleEvidence: number;
+  staleProjections: number;
+  pendingJobs: number;
+  failedJobs: number;
+}
+
+export interface SyncSuggestedAction {
+  actionId: string;
+  action:
+    | 'REINDEX_SOURCE'
+    | 'UPDATE_KNOWLEDGE'
+    | 'VERIFY_EVIDENCE'
+    | 'FINALIZE_PROJECTION';
+  summary: string;
+  worktreeId: string;
+  worktreePath?: string;
+  domain?: string;
+  changedPaths: string[];
+  relatedItemIds?: string[];
+  evidenceRefs?: string[];
+  estimatedWrites: number;
+  estimatedTokens: number;
+  dependsOn?: string[];
+  omitted?: {
+    changedPaths?: number;
+    relatedItemIds?: number;
+    evidenceRefs?: number;
+  };
 }
 
 export interface ProjectSyncStatus {
   projectKey: string;
   dbRevision: number;
   sourceFreshness: Freshness;
+  summary?: SyncStatusSummary;
+  topIssues?: string[];
+  topSuggestedActions?: SyncSuggestedAction[];
+  cacheKey?: string;
+  fingerprint?: string;
+  compact?: boolean;
   snapshots: unknown[];
   projections: unknown[];
   queues: { pending: number; failed: number };
   conflicts: unknown[];
   documentationFreshness: Record<string, number>;
   tasks: unknown[];
+  domainSync?: DomainSyncStatus;
 }
 
 export interface KnowledgeStore {

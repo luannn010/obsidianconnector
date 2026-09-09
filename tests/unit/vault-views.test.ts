@@ -2,6 +2,78 @@ import { describe, expect, it } from 'vitest';
 import { buildProjectViews } from '../../src/worker/vault-views.js';
 
 describe('v2 vault views', () => {
+  it('renders per-domain sync state and unmapped worktree changes', () => {
+    const views = buildProjectViews({
+      projectId: 'p1',
+      projectKey: 'MC-Platform',
+      dbRevision: 9,
+      gitRevision: 'head',
+      architecture: [],
+      workItems: [],
+      worktrees: [],
+      endpoints: [],
+      sequences: [],
+      schemas: [],
+      mappings: [],
+      decisions: [],
+      projections: [],
+      legacyCount: 0,
+      documentationFreshness: {
+        current: 0,
+        possiblyStale: 0,
+        stale: 1,
+        missing: 0,
+        unverified: 0,
+      },
+      agentTasks: [],
+      domainSync: {
+        worktreeId: 'worktree-1',
+        worktreePath: 'C:/repo',
+        branch: 'feature/rcon',
+        currentCommit: 'head',
+        currentDirtyHash: 'dirty',
+        indexedCommit: 'head',
+        indexedDirtyHash: 'dirty',
+        snapshotId: 'snapshot-1',
+        unmappedChanges: ['scratch/unknown.txt'],
+        domains: [
+          {
+            name: 'Server control',
+            notePath:
+              'Published/01 - Architecture/Domains/Server control.md',
+            state: 'stale',
+            lastSyncedCommit: 'base',
+            currentCommit: 'head',
+            currentDirtyHash: 'dirty',
+            databaseRevision: 9,
+            projectionRevision: 8,
+            reasons: ['Mapped source paths changed'],
+            changedPaths: ['services/host-agent/src/rcon.ts'],
+            evidenceRefs: ['knowledge:item-1:v2'],
+          },
+        ],
+      },
+    });
+
+    const index = views.find((view) => view.viewId === 'interaction-index')!;
+    expect(index.body).toContain('Server control');
+    expect(index.body).toContain('stale');
+    expect(index.body).toContain('`base`');
+    expect(index.body).toContain('`head`');
+    const domain = views.find(
+      (view) => view.viewId === 'domain:Server control',
+    )!;
+    expect(domain.body).toContain('services/host-agent/src/rcon.ts');
+    expect(domain.metadata).toMatchObject({
+      current_commit: 'head',
+      domain: 'Server control',
+      sync_status: 'stale',
+      worktree: 'C:/repo',
+    });
+    const sync = views.find((view) => view.viewId === 'sync-status')!;
+    expect(sync.body).toContain('scratch/unknown.txt');
+  });
+
   it('renders the compact dashboard and descriptive service API contract', () => {
     const views = buildProjectViews({
       projectId: 'p1',
@@ -110,18 +182,14 @@ describe('v2 vault views', () => {
     expect(api.body).toContain('POST `/api/servers`');
     expect(api.body).toContain('"name": "world"');
     expect(api.body).toContain('resource.allocate');
-    const activity = views.find(
-      (view) =>
-        view.relativePath === 'Published/02 - Delivery/02 - Task Activity.md',
-    )!;
-    expect(activity.body).toContain('Update observer grants');
-    expect(activity.body).toContain('task-123456789');
-    expect(activity.body).toContain('ptolemy/observer');
-    const task = views.find((view) => view.relativePath.includes('/Tasks/'))!;
-    expect(task.body).toContain('services/observer/server/database.js');
-    expect(task.body).toContain('Codex');
-    expect(task.body).toContain('knowledge:item-1:v2');
-    expect(task.body).toContain('services/observer/tests/database.test.js');
+    expect(
+      views.some((view) => view.relativePath.includes('/Delivery/Tasks/')),
+    ).toBe(false);
+    expect(views.some((view) => view.viewId === 'task-activity')).toBe(false);
+    expect(views[0]?.body).not.toContain('Active agent tasks');
+    expect(views[0]?.body).not.toContain('Task Activity');
+    const history = views.find((view) => view.viewId === 'change-history')!;
+    expect(history.body).toContain('Projection cleanup');
   });
 
   it('keeps long architecture documents out of the dashboard', () => {
@@ -159,5 +227,99 @@ describe('v2 vault views', () => {
     })[0]!;
     expect(dashboard.body.length).toBeLessThan(2000);
     expect(dashboard.body).toContain('Deployment summary.');
+  });
+
+  it('keeps agent task status out of published views', () => {
+    const task = {
+      agent: 'codex' as const,
+      taskId: 'server-worktree-one',
+      taskName: 'Untitled task',
+      status: 'active',
+      worktree: 'C:/repo',
+      branch: 'feature/one',
+      startRevision: 'abc',
+      currentRevision: 'def',
+      documentationGate: 'unverified',
+      startedAt: '2026-09-05T00:00:00.000Z',
+      lastActivityAt: '2026-09-05T00:05:00.000Z',
+      files: [],
+      documentation: [],
+      verificationEvidence: [],
+    };
+    const views = buildProjectViews({
+      projectId: 'p',
+      projectKey: 'P',
+      dbRevision: 1,
+      gitRevision: 'g',
+      architecture: [],
+      workItems: [],
+      worktrees: [],
+      endpoints: [],
+      sequences: [],
+      schemas: [],
+      mappings: [],
+      decisions: [],
+      projections: [],
+      legacyCount: 0,
+      documentationFreshness: {
+        current: 0,
+        possiblyStale: 0,
+        stale: 0,
+        missing: 0,
+        unverified: 0,
+      },
+      agentTasks: [
+        task,
+        { ...task, taskId: 'server-worktree-two', branch: 'feature/two' },
+      ],
+    });
+
+    expect(views.some((view) => view.viewType === 'agent-task')).toBe(false);
+    expect(views.some((view) => view.viewType === 'task-activity')).toBe(false);
+  });
+
+  it('reports the current database revision for projections that will be refreshed', () => {
+    const sync = buildProjectViews({
+      projectId: 'p',
+      projectKey: 'P',
+      dbRevision: 10,
+      gitRevision: 'g',
+      architecture: [],
+      workItems: [],
+      worktrees: [],
+      endpoints: [],
+      sequences: [],
+      schemas: [],
+      mappings: [],
+      decisions: [],
+      projections: [
+        {
+          path: 'Published/01 - Architecture/00 - Architecture Overview.md',
+          state: 'current',
+          revision: 9,
+        },
+        {
+          path: 'Published/01 - Architecture/Domains/Server control.md',
+          state: 'drifted',
+          revision: 9,
+        },
+      ],
+      legacyCount: 0,
+      documentationFreshness: {
+        current: 0,
+        possiblyStale: 0,
+        stale: 0,
+        missing: 0,
+        unverified: 0,
+      },
+      agentTasks: [],
+    }).find((view) => view.viewId === 'sync-status')!;
+
+    expect(sync.body).toContain(
+      'Published/01 - Architecture/00 - Architecture Overview.md | current | 10',
+    );
+    expect(sync.body).toContain(
+      'Published/01 - Architecture/Domains/Server control.md | drifted | 9',
+    );
   });
 });

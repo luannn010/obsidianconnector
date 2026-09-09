@@ -380,4 +380,78 @@ CREATE UNIQUE INDEX IF NOT EXISTS projection_conflicts_one_unresolved_drift
   WHERE resolved_at IS NULL;
 `,
   },
+  {
+    id: '0005_domain_sync_auditing',
+    sql: String.raw`
+ALTER TABLE project_knowledge.worktrees
+  ADD COLUMN IF NOT EXISTS dirty_paths text[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE project_knowledge.note_projections
+  ADD COLUMN IF NOT EXISTS worktree_id uuid REFERENCES project_knowledge.worktrees(id),
+  ADD COLUMN IF NOT EXISTS source_snapshot_id uuid REFERENCES project_knowledge.source_snapshots(id);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.domain_path_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
+  domain_id uuid NOT NULL REFERENCES project_knowledge.domains(id) ON DELETE CASCADE,
+  path_glob text NOT NULL,
+  exclusions text[] NOT NULL DEFAULT '{}',
+  source text NOT NULL DEFAULT 'manifest' CHECK (source IN ('manifest','evidence')),
+  priority integer NOT NULL DEFAULT 100,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(domain_id,path_glob)
+);
+CREATE INDEX IF NOT EXISTS domain_path_rules_project
+  ON project_knowledge.domain_path_rules(project_id,domain_id,priority,path_glob);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.domain_sync_states (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id),
+  domain_id uuid NOT NULL REFERENCES project_knowledge.domains(id) ON DELETE CASCADE,
+  worktree_id uuid NOT NULL REFERENCES project_knowledge.worktrees(id) ON DELETE CASCADE,
+  projection_id uuid REFERENCES project_knowledge.note_projections(id),
+  source_snapshot_id uuid REFERENCES project_knowledge.source_snapshots(id),
+  state text NOT NULL DEFAULT 'unverified'
+    CHECK (state IN ('current','possibly_stale','stale','missing','unverified')),
+  note_path text NOT NULL,
+  current_commit text NOT NULL,
+  current_dirty_hash text,
+  indexed_commit text,
+  indexed_dirty_hash text,
+  last_synced_commit text,
+  last_synced_dirty_hash text,
+  database_revision bigint NOT NULL,
+  projection_revision bigint,
+  reasons text[] NOT NULL DEFAULT '{}',
+  changed_paths text[] NOT NULL DEFAULT '{}',
+  evidence_refs text[] NOT NULL DEFAULT '{}',
+  unmapped_paths text[] NOT NULL DEFAULT '{}',
+  checked_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(domain_id,worktree_id)
+);
+CREATE INDEX IF NOT EXISTS domain_sync_states_lookup
+  ON project_knowledge.domain_sync_states(project_id,worktree_id,state,domain_id);
+
+INSERT INTO project_knowledge.domain_sync_states
+  (project_id,domain_id,worktree_id,projection_id,source_snapshot_id,state,note_path,
+   current_commit,current_dirty_hash,indexed_commit,indexed_dirty_hash,database_revision,
+   projection_revision,reasons)
+SELECT d.project_id,d.id,w.id,p.id,s.id,'unverified',
+  COALESCE(p.relative_path,'Published/01 - Architecture/Domains/'||d.name||'.md'),
+  w.head_commit,w.dirty_hash,s.head_commit,s.dirty_hash,project.db_revision,p.db_revision,
+  ARRAY['Existing domain requires an evidence-backed sync audit']::text[]
+FROM project_knowledge.domains d
+JOIN project_knowledge.projects project ON project.project_id=d.project_id
+JOIN project_knowledge.worktrees w ON w.project_id=d.project_id AND w.registered
+LEFT JOIN LATERAL (
+  SELECT snapshot.id,snapshot.head_commit,snapshot.dirty_hash
+  FROM project_knowledge.source_snapshots snapshot
+  WHERE snapshot.worktree_id=w.id AND snapshot.state='active'
+  ORDER BY snapshot.activated_at DESC NULLS LAST LIMIT 1
+) s ON true
+LEFT JOIN project_knowledge.note_projections p
+  ON p.project_id=d.project_id AND p.view_id='domain:'||d.name
+ON CONFLICT(domain_id,worktree_id) DO NOTHING;
+`,
+  },
 ];
