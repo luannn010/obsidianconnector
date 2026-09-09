@@ -1286,9 +1286,9 @@ export class PgKnowledgeStore implements KnowledgeStore {
         }>(
           `SELECT
                (SELECT COUNT(*)::int FROM project_knowledge.source_evidence WHERE project_id=$1) AS evidence_count,
-               (SELECT MAX(id)::text FROM project_knowledge.source_evidence WHERE project_id=$1) AS evidence_version,
+               (SELECT MAX(id::text) FROM project_knowledge.source_evidence WHERE project_id=$1) AS evidence_version,
                (SELECT COUNT(*)::int FROM project_knowledge.physical_mappings WHERE project_id=$1) AS mapping_count,
-               (SELECT MAX(id)::text FROM project_knowledge.physical_mappings WHERE project_id=$1) AS mapping_version`,
+               (SELECT MAX(id::text) FROM project_knowledge.physical_mappings WHERE project_id=$1) AS mapping_version`,
           [row.project_id],
         ),
       ]);

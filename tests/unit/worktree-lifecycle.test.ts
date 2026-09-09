@@ -75,6 +75,37 @@ describe('registered worktree lifecycle', () => {
     ]);
   });
 
+  it('reconciles only the worktrees selected by compact repair actions', async () => {
+    const featurePath = path.resolve('C:/repo/.worktrees/feature-a');
+    const otherPath = path.resolve('C:/repo/.worktrees/feature-b');
+    const reconciled: string[] = [];
+    const worker = {
+      reconcile: async (input: WorkerProject) => {
+        reconciled.push(input.repositoryPath);
+        return {
+          changed: true,
+          snapshotId: `snapshot-${reconciled.length}`,
+          indexedFiles: 1,
+        };
+      },
+      syncWorktrees: async () => ({
+        registered: 3,
+        unmanaged: 0,
+        removed: 0,
+        paths: [project.repositoryPath, featurePath, otherPath],
+      }),
+    };
+
+    const result = await synchronizeProjectWorktrees(worker, project, {
+      targetPaths: [featurePath],
+    });
+
+    expect(reconciled).toEqual([featurePath]);
+    expect(result.indexedWorktrees.map((entry) => entry.worktreePath)).toEqual([
+      featurePath,
+    ]);
+  });
+
   it('marks database worktrees absent from Git as unregistered without deleting history', async () => {
     const calls: Array<{ sql: string; values?: unknown[] }> = [];
     const database = {

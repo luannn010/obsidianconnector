@@ -468,6 +468,33 @@ describe('PostgreSQL knowledge store', () => {
     expect(result.topSuggestedActions).toEqual([]);
   });
 
+  it('aggregates UUID evidence and mapping versions using PostgreSQL-supported expressions', async () => {
+    const base = syncStatusPool({ projectKey: 'project-uuid-versions' });
+    const pool: PgPoolLike = {
+      connect: base.connect,
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        params?: unknown[],
+      ): Promise<PgQueryResult<Row>> => {
+        if (/MAX\(id\)::text/u.test(sql)) {
+          throw Object.assign(new Error('function max(uuid) does not exist'), {
+            code: '42883',
+          });
+        }
+        return base.query<Row>(sql, params);
+      },
+    };
+
+    await expect(
+      new PgKnowledgeStore(pool).getProjectSyncStatus({
+        projectKey: 'project-uuid-versions',
+        changedOnly: true,
+      }),
+    ).resolves.toMatchObject({
+      sourceFreshness: 'current',
+    });
+  });
+
   it('suggests reindex and update actions for a mapped changed path', async () => {
     const pool: PgPoolLike = {
       connect: async () => {

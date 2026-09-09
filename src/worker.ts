@@ -121,10 +121,25 @@ async function synchronize(): Promise<void> {
                 issueLimit: 10,
                 actionLimit: 10,
               }),
-            reindexSource: async () => {
+            reindexSource: async (actions) => {
+              const targetPaths = [
+                ...new Set(
+                  actions
+                    .map((action) => action.worktreePath)
+                    .filter((worktreePath): worktreePath is string =>
+                      Boolean(worktreePath),
+                    ),
+                ),
+              ];
               const worktrees = await synchronizeProjectWorktrees(
                 worker,
                 project,
+                {
+                  targetPaths:
+                    targetPaths.length > 0
+                      ? targetPaths
+                      : [project.repositoryPath],
+                },
               );
               cycle.worktrees = worktrees;
               if (worktrees.indexedWorktrees.some((entry) => entry.changed))

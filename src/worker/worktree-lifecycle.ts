@@ -51,6 +51,7 @@ export async function deactivateMissingWorktrees(
 export async function synchronizeProjectWorktrees(
   worker: WorktreeSynchronizer,
   project: WorkerProject,
+  options: { targetPaths?: string[] } = {},
 ): Promise<{
   registered: number;
   unmanaged: number;
@@ -58,21 +59,29 @@ export async function synchronizeProjectWorktrees(
   indexedWorktrees: WorktreeIndexResult[];
 }> {
   const primaryPath = path.resolve(project.repositoryPath);
-  const primary = await worker.reconcile(project);
   const worktrees = await worker.syncWorktrees(project);
-  const indexedWorktrees: WorktreeIndexResult[] = [
-    { worktreePath: primaryPath, ...primary },
-  ];
-  const seen = new Set([primaryPath.toLowerCase()]);
-  for (const discoveredPath of worktrees.paths) {
+  const targetPaths = options.targetPaths
+    ? new Set(
+        options.targetPaths.map((worktreePath) =>
+          path.resolve(worktreePath).toLowerCase(),
+        ),
+      )
+    : undefined;
+  const indexedWorktrees: WorktreeIndexResult[] = [];
+  const seen = new Set<string>();
+  for (const discoveredPath of [primaryPath, ...worktrees.paths]) {
     const worktreePath = path.resolve(discoveredPath);
     const normalized = worktreePath.toLowerCase();
     if (seen.has(normalized)) continue;
     seen.add(normalized);
-    const indexed = await worker.reconcile(
-      { ...project, repositoryPath: worktreePath },
-      { primaryRepositoryPath: primaryPath },
-    );
+    if (targetPaths && !targetPaths.has(normalized)) continue;
+    const indexed =
+      normalized === primaryPath.toLowerCase()
+        ? await worker.reconcile(project)
+        : await worker.reconcile(
+            { ...project, repositoryPath: worktreePath },
+            { primaryRepositoryPath: primaryPath },
+          );
     indexedWorktrees.push({ worktreePath, ...indexed });
   }
   return {
