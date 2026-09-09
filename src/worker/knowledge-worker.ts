@@ -1916,22 +1916,52 @@ export class KnowledgeWorker {
         ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) RETURNING id,payload`,
         [limit],
       );
+      const pending: Array<{
+        job: (typeof jobs.rows)[number];
+        chunk: { content: string; project_id: string };
+      }> = [];
       for (const job of jobs.rows) {
-        try {
-          const chunk = (
-            await client.query<{ content: string; project_id: string }>(
-              'SELECT content,project_id FROM project_knowledge.search_chunks WHERE id=$1',
-              [job.payload.chunkId],
+        const chunk = (
+          await client.query<{ content: string; project_id: string }>(
+            'SELECT content,project_id FROM project_knowledge.search_chunks WHERE id=$1',
+            [job.payload.chunkId],
+          )
+        ).rows[0];
+        if (!chunk) {
+          await client.query(
+            "UPDATE project_knowledge.outbox_jobs SET state='done' WHERE id=$1",
+            [job.id],
+          );
+          continue;
+        }
+        pending.push({ job, chunk });
+      }
+      let embeddings: number[][];
+      try {
+        embeddings = this.embedder.embedMany
+          ? await this.embedder.embedMany(
+              pending.map((entry) => entry.chunk.content),
             )
-          ).rows[0];
-          if (!chunk) {
-            await client.query(
-              "UPDATE project_knowledge.outbox_jobs SET state='done' WHERE id=$1",
-              [job.id],
+          : await Promise.all(
+              pending.map((entry) => this.embedder!.embed(entry.chunk.content)),
             );
-            continue;
-          }
-          const embedding = await this.embedder.embed(chunk.content);
+        if (embeddings.length !== pending.length)
+          throw new Error(
+            `Embedding batch returned ${embeddings.length} vectors for ${pending.length} chunks`,
+          );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message.slice(0, 500) : 'Embedding failed';
+        for (const { job } of pending)
+          await client.query(
+            `UPDATE project_knowledge.outbox_jobs SET state='failed',last_error=$2,available_at=now()+interval '30 seconds' WHERE id=$1`,
+            [job.id, message],
+          );
+        return processed;
+      }
+      for (const [index, { job, chunk }] of pending.entries()) {
+        try {
+          const embedding = embeddings[index]!;
           if (embedding.length !== this.embeddingModel.dimensions)
             throw new Error(
               `Embedding dimension mismatch: ${embedding.length}`,

@@ -1,7 +1,8 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Pool } from 'pg';
 import { watch } from 'chokidar';
-import { loadDotEnv } from './config/registry.js';
+import { loadProjectKnowledgeEnvironment } from './config/registry.js';
 import { getRuntimeConfig } from './knowledge/config.js';
 import { OpenAiCompatibleEmbeddingClient } from './knowledge/embedding-client.js';
 import { KnowledgeError } from './knowledge/errors.js';
@@ -15,7 +16,11 @@ import { acquireSingletonLock } from './worker/singleton-lock.js';
 import { runStatusFirstSync } from './worker/status-first-sync.js';
 import { synchronizeProjectWorktrees } from './worker/worktree-lifecycle.js';
 
-loadDotEnv();
+const projectRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
+loadProjectKnowledgeEnvironment(projectRoot);
 const runtime = getRuntimeConfig({
   ...process.env,
   OBSIDIAN_MCP_PROFILE: 'admin',

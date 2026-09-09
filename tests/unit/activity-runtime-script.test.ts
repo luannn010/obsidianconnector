@@ -20,4 +20,11 @@ describe('activity runtime installer', () => {
     expect(script).toContain("OBSIDIAN_MCP_PROFILE = 'standard'");
     expect(script).not.toContain("Join-Path $HOME '.codex\\hooks.json'");
   });
+
+  it('loads the shared project-knowledge environment in the worker entrypoint', async () => {
+    const worker = await readFile('src/worker.ts', 'utf8');
+
+    expect(worker).toContain('loadProjectKnowledgeEnvironment(projectRoot)');
+    expect(worker).not.toContain('loadDotEnv();');
+  });
 });

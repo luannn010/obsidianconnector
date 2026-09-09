@@ -40,6 +40,36 @@ describe('retrieval model HTTP clients', () => {
     ]);
   });
 
+  it('embeds a batch in one request while preserving input order', async () => {
+    let requests = 0;
+    globalThis.fetch = async (_input, init) => {
+      requests += 1;
+      const request = JSON.parse(String(init?.body)) as {
+        input?: string[];
+      };
+      expect(request.input).toEqual(['first chunk', 'second chunk']);
+      return Response.json({
+        data: [
+          { index: 0, embedding: [0.1, 0.2, 0.3] },
+          { index: 1, embedding: [0.4, 0.5, 0.6] },
+        ],
+      });
+    };
+    const client = new OpenAiCompatibleEmbeddingClient(
+      'http://retrieval.local:8080',
+      'BAAI/bge-small-en-v1.5',
+      3,
+    );
+
+    await expect(
+      client.embedMany(['first chunk', 'second chunk']),
+    ).resolves.toEqual([
+      [0.1, 0.2, 0.3],
+      [0.4, 0.5, 0.6],
+    ]);
+    expect(requests).toBe(1);
+  });
+
   it('authenticates reranking and sends the configured model', async () => {
     globalThis.fetch = async (input, init) => {
       if (!String(input).endsWith('/v1/rerank'))

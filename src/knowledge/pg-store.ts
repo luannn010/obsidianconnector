@@ -47,6 +47,7 @@ export interface PgPoolLike {
 }
 export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
+  embedMany?(texts: string[]): Promise<number[][]>;
 }
 export interface Reranker {
   rerank(query: string, hits: ContextHit[]): Promise<ContextHit[]>;

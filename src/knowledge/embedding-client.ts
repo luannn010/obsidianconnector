@@ -11,14 +11,19 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingProvider {
   ) {}
 
   async embed(text: string): Promise<number[]> {
+    return (await this.embedMany([text]))[0]!;
+  }
+
+  async embedMany(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
     const response = await fetch(new URL('/v1/embeddings', this.baseUrl), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
       },
-      body: JSON.stringify({ model: this.model, input: [text] }),
-      signal: AbortSignal.timeout(5000),
+      body: JSON.stringify({ model: this.model, input: texts }),
+      signal: AbortSignal.timeout(30_000),
     }).catch(() => undefined);
     if (!response?.ok)
       throw new KnowledgeError(
@@ -27,21 +32,26 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingProvider {
         true,
       );
     const payload = (await response.json()) as {
-      data?: Array<{ embedding?: number[] }>;
+      data?: Array<{ index?: number; embedding?: number[] }>;
     };
-    const vector = payload.data?.[0]?.embedding;
-    if (!vector || vector.length !== this.dimensions) {
+    const vectors = [...(payload.data ?? [])]
+      .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
+      .map((entry) => entry.embedding);
+    const invalid = vectors.find(
+      (vector) => !vector || vector.length !== this.dimensions,
+    );
+    if (vectors.length !== texts.length || invalid) {
       throw new KnowledgeError(
         'EMBEDDING_UNAVAILABLE',
         'Local embedding model returned an incompatible dimension',
         false,
         {
           expectedDimensions: this.dimensions,
-          actualDimensions: vector?.length ?? 0,
+          actualDimensions: invalid?.length ?? vectors[0]?.length ?? 0,
         },
       );
     }
-    return vector;
+    return vectors as number[][];
   }
 }
 
