@@ -64,6 +64,7 @@ const worker = new KnowledgeWorker(pool, embedder, {
   dimensions: runtime.embeddingDimensions,
 });
 const statusStore = new PgKnowledgeStore(pool as never);
+const MAX_EMBEDDING_JOBS_PER_CYCLE = 50;
 
 let running: Promise<void> | undefined;
 let rerun = false;
@@ -78,8 +79,9 @@ async function bootstrap(): Promise<Record<string, unknown>> {
   const structured = await worker.syncStructuredDocumentation(project);
   const inbox = await worker.processInbox(project);
   const embeddings = await drainQueueBatches(
-    () => worker.processEmbeddings(),
+    (limit) => worker.processEmbeddings(limit),
     50,
+    MAX_EMBEDDING_JOBS_PER_CYCLE,
   );
   const projections = await worker.publishVault(project);
   return {
@@ -158,8 +160,9 @@ async function synchronize(): Promise<void> {
             },
             finalizeProjection: async () => {
               cycle.embeddings = await drainQueueBatches(
-                () => worker.processEmbeddings(),
+                (limit) => worker.processEmbeddings(limit),
                 50,
+                MAX_EMBEDDING_JOBS_PER_CYCLE,
               );
               cycle.projections = await worker.publishVault(project);
               projectionFinalized = true;
@@ -190,8 +193,9 @@ async function synchronize(): Promise<void> {
           !projectionFinalized
         ) {
           cycle.embeddings = await drainQueueBatches(
-            () => worker.processEmbeddings(),
+            (limit) => worker.processEmbeddings(limit),
             50,
+            MAX_EMBEDDING_JOBS_PER_CYCLE,
           );
           cycle.projections = await worker.publishVault(project);
         }

@@ -21,4 +21,19 @@ describe('queue batch draining', () => {
     expect(total).toBe(0);
     expect(calls).toBe(1);
   });
+
+  it('stops at the configured per-cycle limit even when the queue remains full', async () => {
+    const requested: number[] = [];
+    const total = await drainQueueBatches(
+      async (limit) => {
+        requested.push(limit);
+        return limit;
+      },
+      50,
+      100,
+    );
+
+    expect(total).toBe(100);
+    expect(requested).toEqual([50, 50]);
+  });
 });

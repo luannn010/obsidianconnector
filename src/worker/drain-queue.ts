@@ -1,11 +1,14 @@
 export async function drainQueueBatches(
-  processBatch: () => Promise<number>,
+  processBatch: (limit: number) => Promise<number>,
   batchSize: number,
+  maxTotal = Number.POSITIVE_INFINITY,
 ): Promise<number> {
   let total = 0;
-  for (;;) {
-    const processed = await processBatch();
+  while (total < maxTotal) {
+    const requested = Math.min(batchSize, maxTotal - total);
+    const processed = await processBatch(requested);
     total += processed;
-    if (processed < batchSize) return total;
+    if (processed < requested) return total;
   }
+  return total;
 }
