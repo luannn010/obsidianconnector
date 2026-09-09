@@ -15,17 +15,26 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "knowledge:migrate": "tsx src/migrate.ts",
+    "knowledge:worker": "tsx src/worker.ts",
+    "knowledge:activity": "tsx src/activity-server.ts",
+    "knowledge:hook": "tsx src/activity-hook.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.5",
+    "canonicalize": "^4.0.0",
+    "chokidar": "^5.0.0",
+    "gpt-tokenizer": "^4.0.0",
     "gray-matter": "^4.0.3",
+    "pg": "^8.23.0",
     "yaml": "^2.7.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.5",
+    "@types/pg": "^8.23.1",
     "eslint": "^10.8.0",
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",

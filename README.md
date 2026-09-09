@@ -8,7 +8,7 @@ Local, Windows-first MCP access to explicitly registered Obsidian vaults. The se
 - npm
 - An Obsidian vault directory, if you want to register an existing vault
 
-The first version intentionally excludes HTTP, OAuth, tunnels, databases, web hosting, custom UI, semantic search, embeddings, synchronization, and attachment management.
+The admin profile retains the original local vault operations. The standard profile uses PostgreSQL-backed exact, BM25, and optional vector retrieval with generated Obsidian projections.
 
 ## How token savings work
 
@@ -443,3 +443,48 @@ Use temporary test-vault configuration when inspecting write tools. Confirm the 
 - **MCP connection failure:** run `npm run build`, use the absolute `dist/index.js` path, and ensure Node.js 20+ is available to the client.
 - **Protocol or JSON errors:** do not add `console.log` statements; diagnostics must use stderr.
 - **Inspector cannot start:** run the inspector against the built entry point and a temporary registry; do not point tests at the real vault.
+
+## Low-token project knowledge profile
+
+Set `OBSIDIAN_MCP_PROFILE=standard` and `PROJECT_KNOWLEDGE_DATABASE_URL` to expose exactly five routine tools: snapshot, search, expansion, batch write, and sync status. Set `OBSIDIAN_MCP_PROFILE=admin` for legacy vault/file administration.
+
+```powershell
+$env:PROJECT_KNOWLEDGE_DATABASE_URL='postgresql://knowledge_connector:PASSWORD@127.0.0.1:5432/playnode'
+npm run knowledge:migrate
+$env:PROJECT_KNOWLEDGE_REPOSITORY_PATH='C:\path\to\MC-Platform'
+$env:PROJECT_KNOWLEDGE_VAULT_PATH='G:\My Drive\.obsidian\MC-Platform'
+$env:PROJECT_KNOWLEDGE_WORKER_ONCE='true'
+npm run knowledge:worker
+```
+
+The worker fingerprints branch, HEAD, porcelain status, and dirty state. It reuses an active immutable snapshot when these match, or indexes only changed/renamed/deleted files. Canonical knowledge writes synchronously update version history and BM25 content, then queue embedding and Markdown projection work. Embedding failure leaves exact and BM25 retrieval available.
+
+`get_project_sync_status` defaults to a compact, changed-only audit. It returns bounded summary counts, the highest-priority issues, dependency-ordered repair actions, cost estimates, and a fingerprint-backed cache key. A clean result ends the sync without retrieval; use `compact: false` only for deep troubleshooting. The worker uses the same status-first plan, blocks automatic repair when failed jobs exist unless `PROJECT_KNOWLEDGE_ALLOW_FAILED_REPAIR=true`, and leaves projection publishing in the worker lifecycle.
+
+The optional local retrieval service uses `BAAI/bge-small-en-v1.5` with 384-dimensional vectors and `cross-encoder/ms-marco-MiniLM-L-6-v2` for reranking. Start it with a private Bearer token, then configure the connector's embedding and reranker tokens with the same value when both clients use this service:
+
+```powershell
+$env:RETRIEVAL_MODEL_BEARER_TOKEN='replace-with-a-long-random-token'
+docker compose -f services/retrieval-model/compose.yaml up -d --build
+```
+
+Model requests are bounded to two concurrent executions and the container is limited to 4 GiB by default. Set `RETRIEVAL_MODEL_MAX_CONCURRENCY` to another value from 1 through 8 or `RETRIEVAL_MODEL_MEMORY_LIMIT` to another Compose memory value before startup. Health, embedding, and `/v1/rerank` requests require Bearer authentication; health output contains model metadata but no secrets.
+
+### Documentation freshness and Recent Agent Files
+
+Migration `0002_task_traceability_and_doc_freshness` records Codex and Claude tasks, file activity rollups, versioned source evidence, and documentation freshness per worktree snapshot. `.obsidian/workspace.json` remains unmanaged because `lastOpenFiles` is Obsidian UI history and has no reliable agent, task, or worktree identity.
+
+Build the connector and install the local runtime once:
+
+```powershell
+npm run build
+.\scripts\install-activity-runtime.ps1 -RepositoryPath $PWD -ProjectPath 'C:\path\to\MC-Platform'
+```
+
+The installer stores its token in the protected Codex project-knowledge environment file, merges project-local Codex and Claude hooks, and registers two sign-in tasks. `ObsidianProjectKnowledgeActivity` accepts authenticated metadata on `127.0.0.1:8765` and spools temporary database outages. `ObsidianProjectKnowledgeWorker` incrementally indexes changed files, recalculates evidence freshness, and regenerates task views under `Published/02 - Delivery/`. Successful hooks write no output into model context.
+
+Source-verified writes for API contracts, database documentation, architecture boundaries, permissions, and runbooks must include snapshot-bound evidence refs. A stale required record returns `DOCS_STALE` and prevents verified completion until an evidence-backed update makes it current. General and historical notes remain warnings.
+
+Generated pages live under `Published/` during dual-run validation. Human edits belong in `Inbox/`; a generated-page edit is preserved in `Inbox/Conflicts` and reported as projection drift. Managed hashes use canonical JSON SHA-256 for records and normalized UTF-8/LF Markdown SHA-256 excluding volatile managed frontmatter.
+
+The PostgreSQL role should have `USAGE` on `project_knowledge` and DML only for that schema, with no application-schema DML. Keep the pool small and use the configured statement timeout. Run the schema migration with a local database owner before switching the connector to the restricted role.

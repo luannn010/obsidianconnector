@@ -13,8 +13,18 @@ import { registerObsidianTools } from './tools/obsidian-tools.js';
 import { registerProjectTools } from './tools/project-tools.js';
 import { registerVaultTools } from './tools/vault-tools.js';
 import type { ToolContext } from './tools/tool-utils.js';
+import type { KnowledgeStore } from './knowledge/types.js';
+import { registerKnowledgeTools } from './tools/knowledge-tools.js';
 
-export function createServer(registry: VaultRegistry): McpServer {
+export interface ServerOptions {
+  profile?: 'standard' | 'admin';
+  knowledge?: KnowledgeStore;
+}
+
+export function createServer(
+  registry: VaultRegistry,
+  options: ServerOptions = {},
+): McpServer {
   const files = new FilesystemService(registry);
   const mapping = new ProjectMappingService(registry, files);
   const context: ToolContext = {
@@ -30,6 +40,15 @@ export function createServer(registry: VaultRegistry): McpServer {
     name: 'ObsidianConnector',
     version: '0.1.0',
   });
+  if (options.profile === 'standard') {
+    if (!options.knowledge) {
+      throw new Error(
+        'The standard profile requires a project knowledge store',
+      );
+    }
+    registerKnowledgeTools(server, options.knowledge);
+    return server;
+  }
   registerVaultTools(server, context);
   registerDirectoryTools(server, context);
   registerFileTools(server, context);

@@ -1,0 +1,28 @@
+services:
+  retrieval-model:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: ${RETRIEVAL_MODEL_MEMORY_LIMIT:-4g}
+    volumes:
+      - retrieval-model-cache:/tmp/model-cache
+    environment:
+      HF_HOME: /tmp/model-cache
+      RETRIEVAL_MODEL_BEARER_TOKEN: ${RETRIEVAL_MODEL_BEARER_TOKEN:?Set RETRIEVAL_MODEL_BEARER_TOKEN}
+      RETRIEVAL_EMBEDDING_MODEL: ${RETRIEVAL_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      RETRIEVAL_EMBEDDING_DIMENSIONS: ${RETRIEVAL_EMBEDDING_DIMENSIONS:-384}
+      RETRIEVAL_RERANKER_MODEL: ${RETRIEVAL_RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+      RETRIEVAL_MODEL_MAX_CONCURRENCY: ${RETRIEVAL_MODEL_MAX_CONCURRENCY:-2}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+volumes:
+  retrieval-model-cache:
