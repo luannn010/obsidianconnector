@@ -5,6 +5,18 @@ description: Use when retrieving, auditing, synchronizing, updating, or publishi
 
 # Project to Obsidian
 
+## Worker-backed source refresh
+
+When the user requests a refresh, or compact status returns `REINDEX_SOURCE`, run the zero-AI queue command from the connector checkout instead of reading changed files into the conversation. A refresh-only request starts with this command; do not call `get_project_snapshot` first:
+
+```powershell
+.\scripts\sync-project-knowledge.ps1 -ProjectKey <project-key> -WorktreePath '<exact-worktree-path>' -Wait
+```
+
+The command deduplicates `source_sync` by worktree, starts the Windows Docker worker, and returns the authoritative `sync_runs` receipt. Treat `snapshotState: reused` as success: snapshots are created only when HEAD, the content-aware dirty fingerprint, or parser revision changed. Task or prompt completion does not create a snapshot. The Windows container normally exits after 60 idle seconds.
+
+Embedding jobs are already in PostgreSQL. A healthy Debian worker claims them without another request or conversational tokens. If the receipt has pending child jobs but no failures, report them as queued and make at most one compact status call; do not poll. Use `-LocalEmbeddingFallback` only when the Debian embedding heartbeat is stale.
+
 ## Local `.obsidian-local` mapping bootstrap
 
 When the local filesystem ObsidianConnector is connected, initialize a new

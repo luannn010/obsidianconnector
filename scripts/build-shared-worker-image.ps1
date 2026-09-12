@@ -27,7 +27,12 @@ $buildOutput = & $docker buildx build --platform linux/amd64 --file (Join-Path $
 if ($LASTEXITCODE -ne 0) { throw 'Worker image build or push failed' }
 foreach ($line in $buildOutput) { Write-Verbose $line }
 $inspection = & $docker buildx imagetools inspect $tag 2>&1
-if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the pushed image digest' }
-$digestLine = $inspection | Where-Object { $_ -match '^Digest:\s+(sha256:[0-9a-f]{64})$' } | Select-Object -First 1
-if (-not $digestLine -or $digestLine -notmatch '(sha256:[0-9a-f]{64})') { throw 'Registry did not return an image digest' }
-[ordered]@{ release = $release; tag = $tag; image = "$Registry/${Repository}@$($matches[1])"; platform = 'linux/amd64' } | ConvertTo-Json -Compress
+$digestLine = if ($LASTEXITCODE -eq 0) { $inspection | Where-Object { $_ -match '^Digest:\s+(sha256:[0-9a-f]{64})$' } | Select-Object -First 1 }
+$digest = if ($digestLine -and $digestLine -match '(sha256:[0-9a-f]{64})') { $matches[1] }
+if (-not $digest) {
+  $headers = @{ Accept = 'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' }
+  $response = Invoke-WebRequest -Method Head -Uri "http://$Registry/v2/$Repository/manifests/$release" -Headers $headers
+  $digest = [string]$response.Headers['Docker-Content-Digest']
+}
+if ($digest -notmatch '^sha256:[0-9a-f]{64}$') { throw 'Registry did not return an image digest' }
+[ordered]@{ release = $release; tag = $tag; image = "$Registry/${Repository}@$digest"; platform = 'linux/amd64' } | ConvertTo-Json -Compress

@@ -5,7 +5,7 @@ services:
     network_mode: host
     mem_limit: 512m
     env_file:
-      - ${PROJECT_KNOWLEDGE_QUEUE_ENV_FILE:-/opt/project-knowledge/queue-worker/runtime.env}
+      - ${PROJECT_KNOWLEDGE_QUEUE_ENV_FILE:-/home/ptolemy/project-knowledge-worker/runtime.env}
     environment:
       NODE_OPTIONS: --max-old-space-size=384
       PROJECT_KNOWLEDGE_HOST_KIND: debian

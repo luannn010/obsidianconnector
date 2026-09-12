@@ -3,7 +3,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Image,
   [Parameter(Mandatory = $true)][string]$Release,
   [string]$Server = 'ptolemy@192.168.0.164',
-  [string]$RemoteRoot = '/opt/project-knowledge/queue-worker'
+  [string]$RemoteRoot = '/home/ptolemy/project-knowledge-worker'
 )
 
 $ErrorActionPreference = 'Stop'

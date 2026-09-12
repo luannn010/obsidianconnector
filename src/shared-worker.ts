@@ -10,9 +10,9 @@ import { EmbeddingQueueProcessor } from './worker/embedding-queue-processor.js';
 import { HourlySourceScheduler } from './worker/job-scheduler.js';
 import { SharedJobQueue, type WorkerCapability } from './worker/shared-job-queue.js';
 import { SourceSyncJobHandler } from './worker/source-sync-job-handler.js';
-import { pruneSupersededSnapshots } from './worker/snapshot-cleanup.js';
 import { acquireSingletonLock } from './worker/singleton-lock.js';
 import { WorkerInstanceRegistry } from './worker/worker-instance-registry.js';
+import { runMaintenanceCycle } from './worker/maintenance-cycle.js';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 loadProjectKnowledgeEnvironment(projectRoot);
@@ -79,13 +79,14 @@ try {
     try {
       if (scheduler) work += await scheduler.runIfDue(workerId);
       if (capabilities.includes('maintenance') && Date.now() >= nextMaintenance) {
-        work += await queue.recoverExpiredLeases();
-        const projects = (await pool.query<{ project_key: string }>('SELECT project_key FROM project_knowledge.projects ORDER BY project_key')).rows;
-        for (const project of projects) {
-          const stats = await pruneSupersededSnapshots(pool, project.project_key, retentionDays);
-          work += stats.deletedSnapshots;
-        }
         nextMaintenance = Date.now() + 24 * 60 * 60 * 1000;
+        work += await runMaintenanceCycle(pool, queue, retentionDays, (error) => {
+          console.error(JSON.stringify({
+            event: 'maintenance_error',
+            workerId,
+            message: error instanceof Error ? error.message : String(error),
+          }));
+        });
       }
       if (sourceHandler) {
         const [job] = await queue.claim(['source-sync'], workerId, 1);

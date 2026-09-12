@@ -1,6 +1,7 @@
 services:
   queue-worker:
     image: ${PROJECT_KNOWLEDGE_WORKER_IMAGE}
+    user: "0:0"
     restart: "no"
     mem_limit: 512m
     env_file:
