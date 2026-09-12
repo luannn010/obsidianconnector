@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { sourceHash } from '../knowledge/hash.js';
@@ -136,6 +137,32 @@ async function git(root: string, args: string[]): Promise<string> {
   return stdout.trimEnd();
 }
 
+async function hashDirtyState(root: string, status: string): Promise<string | null> {
+  if (!status) return null;
+  const entries = await Promise.all(
+    status
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map(async (line) => {
+        const code = line.slice(0, 2);
+        const rawPath = line.slice(3).trim();
+        const relativePath = rawPath.includes(' -> ')
+          ? rawPath.split(' -> ').at(-1)!
+          : rawPath;
+        if (code.includes('D')) return `${code}\0${relativePath}\0deleted`;
+        try {
+          const content = await readFile(path.join(root, relativePath));
+          return `${code}\0${relativePath}\0${sourceHash(content)}`;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+            return `${code}\0${relativePath}\0deleted`;
+          throw error;
+        }
+      }),
+  );
+  return sourceHash(entries.sort().join('\n'));
+}
+
 export async function fingerprintWorktree(
   root: string,
 ): Promise<WorktreeFingerprint> {
@@ -153,7 +180,7 @@ export async function fingerprintWorktree(
     branch,
     head,
     status,
-    dirtyHash: status ? sourceHash(status) : null,
+    dirtyHash: await hashDirtyState(resolved, status),
   };
 }
 

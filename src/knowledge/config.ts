@@ -7,6 +7,7 @@ export interface RuntimeConfig {
   embeddingBaseUrl?: string;
   embeddingToken?: string;
   embeddingModel: string;
+  embeddingRevision: string;
   embeddingDimensions: number;
   rerankerEnabled: boolean;
   rerankerBaseUrl?: string;
@@ -90,6 +91,8 @@ export function getRuntimeConfig(
     embeddingToken,
     embeddingModel:
       env.PROJECT_KNOWLEDGE_EMBEDDING_MODEL?.trim() || 'BAAI/bge-small-en-v1.5',
+    embeddingRevision:
+      env.PROJECT_KNOWLEDGE_EMBEDDING_REVISION?.trim() || 'local',
     embeddingDimensions: boundedInteger(
       env.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS,
       384,

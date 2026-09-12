@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import { loadDotEnv } from './config/registry.js';
+import { loadProjectKnowledgeEnvironment } from './config/registry.js';
 import { getRuntimeConfig } from './knowledge/config.js';
 import { knowledgeMigrations } from './knowledge/migrations.js';
 import {
@@ -7,7 +7,7 @@ import {
   type PgPoolLike,
 } from './knowledge/pg-store.js';
 
-loadDotEnv();
+loadProjectKnowledgeEnvironment(process.cwd());
 const config = getRuntimeConfig({
   ...process.env,
   OBSIDIAN_MCP_PROFILE: 'admin',

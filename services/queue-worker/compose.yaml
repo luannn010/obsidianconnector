@@ -1,0 +1,13 @@
+services:
+  queue-worker:
+    build:
+      context: ../..
+      dockerfile: services/queue-worker/Dockerfile
+    image: project-knowledge-queue-worker:${PROJECT_KNOWLEDGE_QUEUE_RELEASE:-local}
+    container_name: project-knowledge-queue-worker
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ${PROJECT_KNOWLEDGE_QUEUE_ENV_FILE:-/opt/project-knowledge/queue-worker/runtime.env}
+    environment:
+      PROJECT_KNOWLEDGE_QUEUE_RELEASE: ${PROJECT_KNOWLEDGE_QUEUE_RELEASE:-local}

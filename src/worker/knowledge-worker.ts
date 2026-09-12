@@ -30,6 +30,7 @@ import { parseApiContracts } from './api-contract-parser.js';
 import { parseSequenceFlows } from './sequence-parser.js';
 import { buildDomainSyncReport, importDomainManifest } from './domain-audit.js';
 import { deactivateMissingWorktrees } from './worktree-lifecycle.js';
+import { EmbeddingQueueProcessor } from './embedding-queue-processor.js';
 
 export interface WorkerProject {
   projectKey: string;
@@ -105,6 +106,8 @@ export function appendIndexablePreviousDirtyPaths(
 }
 
 export class KnowledgeWorker {
+  private readonly embeddingQueue?: EmbeddingQueueProcessor;
+
   constructor(
     private readonly pool: Pool,
     private readonly embedder?: EmbeddingProvider,
@@ -113,7 +116,14 @@ export class KnowledgeWorker {
       revision: 'local',
       dimensions: 1024,
     },
-  ) {}
+  ) {
+    if (embedder)
+      this.embeddingQueue = new EmbeddingQueueProcessor(
+        pool,
+        embedder,
+        embeddingModel,
+      );
+  }
 
   async reconcile(
     project: WorkerProject,
@@ -358,7 +368,7 @@ export class KnowledgeWorker {
           );
           await client.query(
             `INSERT INTO project_knowledge.outbox_jobs(project_id,job_type,payload)
-            VALUES($1,'embed_chunk',$2)`,
+            VALUES($1,'embed_chunk',$2) ON CONFLICT DO NOTHING`,
             [projectRow.project_id, { chunkId: inserted.rows[0]!.id }],
           );
         }
@@ -1903,105 +1913,8 @@ export class KnowledgeWorker {
   }
 
   async processEmbeddings(limit = 50): Promise<number> {
-    if (!this.embedder) return 0;
-    const client = await this.pool.connect();
-    let processed = 0;
-    try {
-      const jobs = await client.query<{
-        id: string;
-        payload: { chunkId: string };
-      }>(
-        `UPDATE project_knowledge.outbox_jobs SET state='processing',locked_at=now(),attempts=attempts+1
-        WHERE id IN (SELECT id FROM project_knowledge.outbox_jobs WHERE (state IN ('pending','failed') OR (state='processing' AND locked_at<=now()-interval '5 minutes')) AND job_type='embed_chunk' AND available_at<=now()
-        ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) RETURNING id,payload`,
-        [limit],
-      );
-      const pending: Array<{
-        job: (typeof jobs.rows)[number];
-        chunk: { content: string; project_id: string };
-      }> = [];
-      for (const job of jobs.rows) {
-        const chunk = (
-          await client.query<{ content: string; project_id: string }>(
-            'SELECT content,project_id FROM project_knowledge.search_chunks WHERE id=$1',
-            [job.payload.chunkId],
-          )
-        ).rows[0];
-        if (!chunk) {
-          await client.query(
-            "UPDATE project_knowledge.outbox_jobs SET state='done' WHERE id=$1",
-            [job.id],
-          );
-          continue;
-        }
-        pending.push({ job, chunk });
-      }
-      let embeddings: number[][];
-      try {
-        embeddings = this.embedder.embedMany
-          ? await this.embedder.embedMany(
-              pending.map((entry) => entry.chunk.content),
-            )
-          : await Promise.all(
-              pending.map((entry) => this.embedder!.embed(entry.chunk.content)),
-            );
-        if (embeddings.length !== pending.length)
-          throw new Error(
-            `Embedding batch returned ${embeddings.length} vectors for ${pending.length} chunks`,
-          );
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message.slice(0, 500) : 'Embedding failed';
-        for (const { job } of pending)
-          await client.query(
-            `UPDATE project_knowledge.outbox_jobs SET state='failed',last_error=$2,available_at=now()+interval '30 seconds' WHERE id=$1`,
-            [job.id, message],
-          );
-        return processed;
-      }
-      for (const [index, { job, chunk }] of pending.entries()) {
-        try {
-          const embedding = embeddings[index]!;
-          if (embedding.length !== this.embeddingModel.dimensions)
-            throw new Error(
-              `Embedding dimension mismatch: ${embedding.length}`,
-            );
-          const modelId = (
-            await client.query<{ id: string }>(
-              `INSERT INTO project_knowledge.embedding_models(project_id,model_name,model_revision,dimensions,active)
-            VALUES($1,$2,$3,$4,true) ON CONFLICT(project_id,model_name,model_revision) DO UPDATE SET dimensions=EXCLUDED.dimensions,active=true RETURNING id`,
-              [
-                chunk.project_id,
-                this.embeddingModel.name,
-                this.embeddingModel.revision,
-                this.embeddingModel.dimensions,
-              ],
-            )
-          ).rows[0]!.id;
-          await client.query(
-            'UPDATE project_knowledge.search_chunks SET embedding=$2::vector,embedding_model_id=$3 WHERE id=$1',
-            [job.payload.chunkId, `[${embedding.join(',')}]`, modelId],
-          );
-          await client.query(
-            "UPDATE project_knowledge.outbox_jobs SET state='done',last_error=NULL WHERE id=$1",
-            [job.id],
-          );
-          processed++;
-        } catch (error) {
-          await client.query(
-            `UPDATE project_knowledge.outbox_jobs SET state='failed',last_error=$2,available_at=now()+interval '30 seconds' WHERE id=$1`,
-            [
-              job.id,
-              error instanceof Error
-                ? error.message.slice(0, 500)
-                : 'Embedding failed',
-            ],
-          );
-        }
-      }
-      return processed;
-    } finally {
-      client.release();
-    }
+    if (!this.embeddingQueue) return 0;
+    const stats = await this.embeddingQueue.processBatch(limit);
+    return stats.claimed + stats.retired + stats.reused + stats.completed;
   }
 }

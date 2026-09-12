@@ -32,6 +32,7 @@ describe('project knowledge migrations', () => {
       'documentation_freshness',
       'domain_path_rules',
       'domain_sync_states',
+      'worker_health',
     ]) {
       expect(sql).toContain(`project_knowledge.${table}`);
     }
@@ -53,9 +54,11 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('knowledge_version_id');
     expect(sql).toContain('locator_type');
     expect(sql).toContain('parser_revision');
-    expect(knowledgeMigrations.at(-1)?.id).toBe(
-      '0005_domain_sync_auditing',
-    );
+    expect(sql).toContain('finished_at timestamptz');
+    expect(sql).toContain("state IN ('pending','failed','processing')");
+    expect(sql).toContain('outbox_jobs_one_live_embedding');
+    expect(sql).toContain('search_chunks_embedding_reuse');
+    expect(knowledgeMigrations.at(-1)?.id).toBe('0006_queue_worker_health');
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);

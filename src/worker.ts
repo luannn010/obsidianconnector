@@ -56,6 +56,7 @@ if (!singleton.acquired) {
   process.exit(0);
 }
 const embedder = runtime.embeddingBaseUrl
+  && process.env.PROJECT_KNOWLEDGE_PROCESS_EMBEDDINGS !== 'false'
   ? new OpenAiCompatibleEmbeddingClient(
       runtime.embeddingBaseUrl,
       runtime.embeddingModel,
@@ -65,7 +66,7 @@ const embedder = runtime.embeddingBaseUrl
   : undefined;
 const worker = new KnowledgeWorker(pool, embedder, {
   name: runtime.embeddingModel,
-  revision: 'local',
+  revision: runtime.embeddingRevision,
   dimensions: runtime.embeddingDimensions,
 });
 const statusStore = new PgKnowledgeStore(pool as never);

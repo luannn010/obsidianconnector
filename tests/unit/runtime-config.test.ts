@@ -23,6 +23,7 @@ describe('knowledge runtime configuration', () => {
       profile: 'admin',
       poolMax: 4,
       embeddingModel: 'BAAI/bge-small-en-v1.5',
+      embeddingRevision: 'local',
       embeddingDimensions: 384,
       rerankerModel: 'cross-encoder/ms-marco-MiniLM-L-6-v2',
       activityEnabled: false,

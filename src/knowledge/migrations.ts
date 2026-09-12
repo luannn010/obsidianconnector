@@ -454,4 +454,38 @@ LEFT JOIN project_knowledge.note_projections p
 ON CONFLICT(domain_id,worktree_id) DO NOTHING;
 `,
   },
+  {
+    id: '0006_queue_worker_health',
+    sql: String.raw`
+ALTER TABLE project_knowledge.outbox_jobs
+  ADD COLUMN IF NOT EXISTS finished_at timestamptz,
+  ADD COLUMN IF NOT EXISTS resolution jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_jobs_one_live_embedding
+  ON project_knowledge.outbox_jobs(project_id,job_type,(payload->>'chunkId'))
+  WHERE job_type='embed_chunk' AND state IN ('pending','failed','processing');
+
+CREATE INDEX IF NOT EXISTS search_chunks_embedding_reuse
+  ON project_knowledge.search_chunks(project_id,content_hash,embedding_model_id)
+  WHERE embedding IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS project_knowledge.worker_health (
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id) ON DELETE CASCADE,
+  worker_role text NOT NULL,
+  release_id text,
+  heartbeat_at timestamptz NOT NULL DEFAULT now(),
+  last_successful_batch_at timestamptz,
+  processed_count bigint NOT NULL DEFAULT 0,
+  reused_count bigint NOT NULL DEFAULT 0,
+  retired_count bigint NOT NULL DEFAULT 0,
+  pending_count bigint NOT NULL DEFAULT 0,
+  failed_count bigint NOT NULL DEFAULT 0,
+  last_error text,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY(project_id,worker_role)
+);
+CREATE INDEX IF NOT EXISTS worker_health_heartbeat
+  ON project_knowledge.worker_health(worker_role,heartbeat_at DESC);
+`,
+  },
 ];
