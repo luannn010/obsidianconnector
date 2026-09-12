@@ -1,94 +1,63 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
+  [Parameter(Mandatory = $true)][string]$Image,
+  [Parameter(Mandatory = $true)][string]$Release,
   [string]$Server = 'ptolemy@192.168.0.164',
-  [string]$RemoteRoot = '/opt/project-knowledge/queue-worker',
-  [string]$ProjectKey = 'MC-Platform'
+  [string]$RemoteRoot = '/opt/project-knowledge/queue-worker'
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Image -notmatch '^192\.168\.0\.164:5000/project-knowledge-worker@sha256:[0-9a-f]{64}$') { throw 'Image must be the approved registry repository pinned by sha256 digest' }
+if ($Release -notmatch '^[0-9a-f]{12,64}$') { throw 'Release must be a hexadecimal content hash' }
 if ($Server -notmatch '^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$') { throw 'Invalid SSH server' }
 if ($RemoteRoot -notmatch '^/[A-Za-z0-9._/-]+$') { throw 'Invalid remote root' }
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
 $scp = (Get-Command scp.exe -ErrorAction Stop).Source
-$tar = (Get-Command tar.exe -ErrorAction Stop).Source
-
-$releaseFiles = @(
-  'package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.build.json',
-  'src', 'services/queue-worker'
-)
-$hashFiles = foreach ($item in $releaseFiles) {
-  $full = Join-Path $repoRoot $item
-  if (Test-Path -LiteralPath $full -PathType Container) {
-    Get-ChildItem -LiteralPath $full -File -Recurse
-  } else { Get-Item -LiteralPath $full }
-}
-$manifest = $hashFiles | Sort-Object FullName | ForEach-Object {
-  $relative = [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/')
-  "$relative`t$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
-}
-$sha = [Security.Cryptography.SHA256]::Create()
-try {
-  $release = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($manifest -join "`n"))))).Replace('-', '').ToLowerInvariant()
-} finally { $sha.Dispose() }
-$release = $release.Substring(0, 24)
-$remoteRelease = "$RemoteRoot/releases/$release"
-Write-Host "Queue worker release: $release"
-
-$temporary = Join-Path ([IO.Path]::GetTempPath()) "queue-worker-$release"
+$composeSource = Join-Path $repoRoot 'services\queue-worker\compose.yaml'
+$temporary = Join-Path ([IO.Path]::GetTempPath()) "project-knowledge-debian-$Release"
 [void][IO.Directory]::CreateDirectory($temporary)
-$archive = Join-Path $temporary 'release.tar.gz'
 $runtimeFile = Join-Path $temporary 'runtime.env'
+$settings = @{}
+foreach ($configPath in @((Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\project-knowledge.env'), (Join-Path $repoRoot '.env'))) {
+  if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { continue }
+  foreach ($line in Get-Content -LiteralPath $configPath) {
+    if ($line -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$') { $settings[$matches[1]] = $matches[2].Trim('"', "'") }
+  }
+}
+foreach ($required in @('PROJECT_KNOWLEDGE_DATABASE_URL', 'PROJECT_KNOWLEDGE_EMBEDDING_TOKEN')) {
+  if (-not $settings[$required]) { throw "$required is missing from project knowledge configuration" }
+}
+Set-Content -LiteralPath $runtimeFile -Encoding utf8NoBOM -Value @(
+  "PROJECT_KNOWLEDGE_DATABASE_URL=$($settings.PROJECT_KNOWLEDGE_DATABASE_URL)",
+  'PROJECT_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080',
+  "PROJECT_KNOWLEDGE_EMBEDDING_TOKEN=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_TOKEN)",
+  "PROJECT_KNOWLEDGE_EMBEDDING_MODEL=$(if ($settings.PROJECT_KNOWLEDGE_EMBEDDING_MODEL) { $settings.PROJECT_KNOWLEDGE_EMBEDDING_MODEL } else { 'BAAI/bge-small-en-v1.5' })",
+  "PROJECT_KNOWLEDGE_EMBEDDING_REVISION=$(if ($settings.PROJECT_KNOWLEDGE_EMBEDDING_REVISION) { $settings.PROJECT_KNOWLEDGE_EMBEDDING_REVISION } else { 'local' })",
+  "PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS=$(if ($settings.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS) { $settings.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS } else { '384' })",
+  'PROJECT_KNOWLEDGE_DB_POOL_MAX=4',
+  'PROJECT_KNOWLEDGE_STATEMENT_TIMEOUT_MS=30000',
+  'PROJECT_KNOWLEDGE_QUEUE_POLL_MS=1000',
+  'PROJECT_KNOWLEDGE_SNAPSHOT_RETENTION_DAYS=7'
+)
+$remoteRelease = "$RemoteRoot/releases/$Release"
+if (-not $PSCmdlet.ShouldProcess($Server, "Deploy shared worker $Image")) {
+  [ordered]@{ server = $Server; release = $Release; image = $Image; action = 'what-if' } | ConvertTo-Json -Compress
+  return
+}
 try {
-  & $tar -czf $archive -C $repoRoot @releaseFiles
-  if ($LASTEXITCODE -ne 0) { throw 'Failed to create deployment archive' }
-
-  $settings = @{}
-  $configPaths = @(
-    (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\project-knowledge.env'),
-    (Join-Path $repoRoot '.env')
-  )
-  foreach ($configPath in $configPaths) {
-    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { continue }
-    foreach ($line in Get-Content -LiteralPath $configPath) {
-      if ($line -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$') {
-        $settings[$matches[1]] = $matches[2].Trim('"', "'")
-      }
-    }
-  }
-  foreach ($required in @('PROJECT_KNOWLEDGE_DATABASE_URL', 'PROJECT_KNOWLEDGE_EMBEDDING_TOKEN')) {
-    if (-not $settings[$required]) { throw "$required is missing from project knowledge configuration" }
-  }
-  $runtimeLines = @(
-    "PROJECT_KNOWLEDGE_DATABASE_URL=$($settings.PROJECT_KNOWLEDGE_DATABASE_URL)",
-    'PROJECT_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080',
-    "PROJECT_KNOWLEDGE_EMBEDDING_TOKEN=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_TOKEN)",
-    "PROJECT_KNOWLEDGE_EMBEDDING_MODEL=$(if ($settings.PROJECT_KNOWLEDGE_EMBEDDING_MODEL) { $settings.PROJECT_KNOWLEDGE_EMBEDDING_MODEL } else { 'BAAI/bge-small-en-v1.5' })",
-    "PROJECT_KNOWLEDGE_EMBEDDING_REVISION=$(if ($settings.PROJECT_KNOWLEDGE_EMBEDDING_REVISION) { $settings.PROJECT_KNOWLEDGE_EMBEDDING_REVISION } else { 'local' })",
-    "PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS=$(if ($settings.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS) { $settings.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS } else { '384' })",
-    "PROJECT_KNOWLEDGE_PROJECT_KEY=$ProjectKey",
-    "PROJECT_KNOWLEDGE_QUEUE_RELEASE=$release",
-    'PROJECT_KNOWLEDGE_DB_POOL_MAX=2',
-    'PROJECT_KNOWLEDGE_STATEMENT_TIMEOUT_MS=30000',
-    'PROJECT_KNOWLEDGE_QUEUE_BATCH_SIZE=50',
-    'PROJECT_KNOWLEDGE_QUEUE_POLL_MS=1000',
-    'PROJECT_KNOWLEDGE_SNAPSHOT_RETENTION_DAYS=7'
-  )
-  Set-Content -LiteralPath $runtimeFile -Value $runtimeLines -Encoding utf8NoBOM
-
-  if (-not $PSCmdlet.ShouldProcess($Server, "Deploy queue worker release $release")) { return }
-  $previous = (& $ssh $Server "readlink -f '$RemoteRoot/current' 2>/dev/null || true").Trim()
-  & $ssh $Server "set -eu; mkdir -p '$RemoteRoot/releases'; rm -f '/tmp/queue-worker-$release.tar.gz' '/tmp/queue-worker-$release.env'"
-  if ($LASTEXITCODE -ne 0) { throw 'Failed to prepare remote release directory' }
-  & $scp $archive "${Server}:/tmp/queue-worker-$release.tar.gz"
-  if ($LASTEXITCODE -ne 0) { throw 'Failed to upload release archive' }
-  & $scp $runtimeFile "${Server}:/tmp/queue-worker-$release.env"
-  if ($LASTEXITCODE -ne 0) { throw 'Failed to upload runtime configuration' }
-  $activate = "set -eu; mkdir -p '$remoteRelease'; tar -xzf '/tmp/queue-worker-$release.tar.gz' -C '$remoteRelease'; install -m 600 '/tmp/queue-worker-$release.env' '$RemoteRoot/runtime.env'; export PROJECT_KNOWLEDGE_QUEUE_RELEASE='$release'; export PROJECT_KNOWLEDGE_QUEUE_ENV_FILE='$RemoteRoot/runtime.env'; docker compose -p project-knowledge-queue -f '$remoteRelease/services/queue-worker/compose.yaml' build; docker compose -p project-knowledge-queue -f '$remoteRelease/services/queue-worker/compose.yaml' up -d"
+  $previousImage = (& $ssh $Server "docker inspect project-knowledge-queue-queue-worker-1 --format '{{.Config.Image}}' 2>/dev/null || true").Trim()
+  & $ssh $Server "set -eu; mkdir -p '$remoteRelease' '$RemoteRoot/releases'"
+  if ($LASTEXITCODE -ne 0) { throw 'Could not prepare Debian release directory' }
+  & $scp $composeSource "${Server}:/tmp/project-knowledge-compose-$Release.yaml"
+  if ($LASTEXITCODE -ne 0) { throw 'Could not upload Debian Compose file' }
+  & $scp $runtimeFile "${Server}:/tmp/project-knowledge-runtime-$Release.env"
+  if ($LASTEXITCODE -ne 0) { throw 'Could not upload Debian runtime configuration' }
+  $activate = "set -eu; install -m 644 '/tmp/project-knowledge-compose-$Release.yaml' '$remoteRelease/compose.yaml'; install -m 600 '/tmp/project-knowledge-runtime-$Release.env' '$RemoteRoot/runtime.env'; export PROJECT_KNOWLEDGE_WORKER_IMAGE='$Image'; export PROJECT_KNOWLEDGE_WORKER_RELEASE='$Release'; export PROJECT_KNOWLEDGE_QUEUE_ENV_FILE='$RemoteRoot/runtime.env'; docker compose -p project-knowledge-queue -f '$remoteRelease/compose.yaml' pull; docker compose -p project-knowledge-queue -f '$remoteRelease/compose.yaml' up -d"
   & $ssh $Server $activate
-  if ($LASTEXITCODE -ne 0) { throw 'Remote queue worker deployment failed' }
-
-  $env:PROJECT_KNOWLEDGE_EXPECTED_QUEUE_RELEASE = $release
+  if ($LASTEXITCODE -ne 0) { throw 'Debian shared worker deployment failed' }
+  $env:PROJECT_KNOWLEDGE_EXPECTED_QUEUE_RELEASE = $Release
+  $env:PROJECT_KNOWLEDGE_EXPECTED_HOST_KIND = 'debian'
   $healthy = $false
   for ($attempt = 1; $attempt -le 12; $attempt++) {
     & node (Join-Path $repoRoot 'dist\queue-health.js') *> $null
@@ -96,18 +65,15 @@ try {
     Start-Sleep -Seconds 5
   }
   if (-not $healthy) {
-    Write-Warning 'New release heartbeat failed; starting rollback.'
-    if ($previous) {
-      $rollback = "set -eu; export PROJECT_KNOWLEDGE_QUEUE_RELEASE='rollback'; export PROJECT_KNOWLEDGE_QUEUE_ENV_FILE='$RemoteRoot/runtime.env'; docker compose -p project-knowledge-queue -f '$previous/services/queue-worker/compose.yaml' up -d; ln -sfn '$previous' '$RemoteRoot/current'"
+    if ($previousImage) {
+      $rollback = "set -eu; export PROJECT_KNOWLEDGE_WORKER_IMAGE='$previousImage'; export PROJECT_KNOWLEDGE_WORKER_RELEASE='rollback'; export PROJECT_KNOWLEDGE_QUEUE_ENV_FILE='$RemoteRoot/runtime.env'; docker compose -p project-knowledge-queue -f '$remoteRelease/compose.yaml' up -d"
       & $ssh $Server $rollback
     }
-    throw 'Queue worker heartbeat verification failed after rollback'
+    throw 'Debian heartbeat verification failed; the previous image was restored when available'
   }
-  & $ssh $Server "set -eu; ln -sfn '$remoteRelease' '$RemoteRoot/current'; rm -f '/tmp/queue-worker-$release.tar.gz' '/tmp/queue-worker-$release.env'"
-  if ($LASTEXITCODE -ne 0) { throw 'Worker is healthy but the current release link was not switched' }
-  Write-Host "Queue worker release $release is healthy and active."
+  & $ssh $Server "set -eu; ln -sfn '$remoteRelease' '$RemoteRoot/current'; rm -f '/tmp/project-knowledge-compose-$Release.yaml' '/tmp/project-knowledge-runtime-$Release.env'"
+  if ($LASTEXITCODE -ne 0) { throw 'Worker is healthy but the active release link could not be switched' }
+  [ordered]@{ server = $Server; release = $Release; image = $Image; state = 'healthy' } | ConvertTo-Json -Compress
 } finally {
-  if (Test-Path -LiteralPath $temporary) {
-    [IO.Directory]::Delete($temporary, $true)
-  }
+  Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 }

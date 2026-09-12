@@ -46,6 +46,8 @@ describe('EmbeddingQueueProcessor', () => {
     });
     expect(embedder.embedMany).toHaveBeenCalledWith(['same', 'different']);
     expect(queries.some(({ sql }) => sql.includes('SKIP LOCKED'))).toBe(true);
+    expect(queries.some(({ sql }) => sql.includes('project_rank=1'))).toBe(true);
+    expect(queries.some(({ sql }) => sql.includes('active_chunk.content_hash=c.content_hash'))).toBe(true);
     expect(queries.filter(({ sql }) => sql.includes('AS applied'))).toHaveLength(2);
   });
 

@@ -19,6 +19,8 @@
     "knowledge:migrate": "tsx src/migrate.ts",
     "knowledge:worker": "tsx src/worker.ts",
     "knowledge:queue-worker": "tsx src/queue-worker.ts",
+    "knowledge:shared-worker": "tsx src/shared-worker.ts",
+    "knowledge:request-sync": "tsx src/request-source-sync.ts",
     "knowledge:queue-health": "tsx src/queue-health.ts",
     "knowledge:sync-project": "tsx src/sync-project.ts",
     "knowledge:activity": "tsx src/activity-server.ts",

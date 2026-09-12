@@ -1,13 +1,14 @@
 services:
   queue-worker:
-    build:
-      context: ../..
-      dockerfile: services/queue-worker/Dockerfile
-    image: project-knowledge-queue-worker:${PROJECT_KNOWLEDGE_QUEUE_RELEASE:-local}
-    container_name: project-knowledge-queue-worker
+    image: ${PROJECT_KNOWLEDGE_WORKER_IMAGE}
     restart: unless-stopped
     network_mode: host
+    mem_limit: 512m
     env_file:
       - ${PROJECT_KNOWLEDGE_QUEUE_ENV_FILE:-/opt/project-knowledge/queue-worker/runtime.env}
     environment:
-      PROJECT_KNOWLEDGE_QUEUE_RELEASE: ${PROJECT_KNOWLEDGE_QUEUE_RELEASE:-local}
+      NODE_OPTIONS: --max-old-space-size=384
+      PROJECT_KNOWLEDGE_HOST_KIND: debian
+      PROJECT_KNOWLEDGE_WORKER_CAPABILITIES: scheduler,embedding,maintenance
+      PROJECT_KNOWLEDGE_WORKER_RELEASE: ${PROJECT_KNOWLEDGE_WORKER_RELEASE}
+      PROJECT_KNOWLEDGE_QUEUE_BATCH_SIZE: 16

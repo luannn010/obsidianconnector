@@ -35,6 +35,7 @@ export class EmbeddingQueueProcessor {
     private readonly pool: Pool,
     private readonly embedder: EmbeddingProvider,
     private readonly model: EmbeddingModelIdentity,
+    private readonly workerId = `embedding-${process.pid}`,
   ) {}
 
   private async sweep(client: PoolClient, limit: number): Promise<Omit<EmbeddingBatchStats, 'claimed' | 'embedded' | 'applied' | 'failed'>> {
@@ -48,11 +49,14 @@ export class EmbeddingQueueProcessor {
         `WITH live AS MATERIALIZED (
            SELECT j.id,j.project_id,j.payload->>'chunkId' AS chunk_id
            FROM project_knowledge.outbox_jobs j
-           WHERE j.job_type='embed_chunk' AND j.state IN ('pending','failed','processing')
+           WHERE j.job_type='embed_chunk'
+             AND (j.state IN ('pending','failed') OR
+                  (j.state='processing' AND j.lease_expires_at<now()))
            ORDER BY j.created_at LIMIT $4
          ), retired_missing AS (
            UPDATE project_knowledge.outbox_jobs j
            SET state='superseded',finished_at=now(),locked_at=NULL,last_error=NULL,
+               lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),
                resolution=jsonb_build_object('reason','missing_chunk')
            FROM live l
            WHERE j.id=l.id AND NOT EXISTS (
@@ -61,6 +65,7 @@ export class EmbeddingQueueProcessor {
          ), retired_superseded AS (
            UPDATE project_knowledge.outbox_jobs j
            SET state='superseded',finished_at=now(),locked_at=NULL,last_error=NULL,
+               lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),
                resolution=jsonb_build_object('reason','superseded_snapshot')
            FROM live l JOIN project_knowledge.search_chunks c ON c.id=l.chunk_id::uuid
            JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
@@ -68,6 +73,7 @@ export class EmbeddingQueueProcessor {
          ), completed AS (
            UPDATE project_knowledge.outbox_jobs j
            SET state='done',finished_at=now(),locked_at=NULL,last_error=NULL,
+               lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),
                resolution=jsonb_build_object('reason','already_embedded')
            FROM live l JOIN project_knowledge.search_chunks c ON c.id=l.chunk_id::uuid
            LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
@@ -92,16 +98,19 @@ export class EmbeddingQueueProcessor {
          ), reused AS (
            UPDATE project_knowledge.outbox_jobs j
            SET state='done',finished_at=now(),locked_at=NULL,last_error=NULL,
+               lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),
                resolution=jsonb_build_object('reason','reused_embedding')
            FROM reused_chunks r WHERE j.payload->>'chunkId'=r.id::text
-             AND j.job_type='embed_chunk' AND j.state IN ('pending','failed','processing')
+             AND j.job_type='embed_chunk'
+             AND (j.state IN ('pending','failed') OR j.lease_owner=$5 OR
+                  (j.state='processing' AND j.lease_expires_at<now()))
            RETURNING j.id
          )
          SELECT (SELECT count(*) FROM retired_superseded) AS retired_superseded,
                 (SELECT count(*) FROM retired_missing) AS retired_missing,
                 (SELECT count(*) FROM completed) AS completed,
                 (SELECT count(*) FROM reused) AS reused`,
-        [this.model.name, this.model.revision, this.model.dimensions, Math.max(100, limit * 10)],
+        [this.model.name, this.model.revision, this.model.dimensions, Math.max(100, limit * 10), this.workerId],
       )
     ).rows[0] ?? {
       retired_superseded: 0,
@@ -119,23 +128,38 @@ export class EmbeddingQueueProcessor {
   private async claim(client: PoolClient, limit: number): Promise<ClaimedJob[]> {
     return (
       await client.query<ClaimedJob>(
-        `WITH candidates AS (
-           SELECT j.id
+        `WITH fair AS (
+           SELECT j.id,j.project_id,j.priority,j.created_at,c.content_hash,
+                  row_number() OVER (PARTITION BY j.project_id ORDER BY j.priority DESC,j.created_at,j.id) AS project_rank
            FROM project_knowledge.outbox_jobs j
            JOIN project_knowledge.search_chunks c ON c.id=(j.payload->>'chunkId')::uuid
            LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
-           WHERE j.job_type='embed_chunk' AND j.available_at<=now()
-             AND (j.state IN ('pending','failed') OR (j.state='processing' AND j.locked_at<=now()-interval '5 minutes'))
+           WHERE j.job_type='embed_chunk' AND j.required_capability='embedding'
+             AND j.available_at<=now() AND j.attempts<j.max_attempts
+             AND (j.state IN ('pending','failed') OR
+                  (j.state='processing' AND j.lease_expires_at<now()))
              AND c.embedding IS NULL AND (c.snapshot_id IS NULL OR s.state='active')
-           ORDER BY j.created_at FOR UPDATE OF j SKIP LOCKED LIMIT $1
+             AND NOT EXISTS (
+               SELECT 1 FROM project_knowledge.outbox_jobs active_job
+               JOIN project_knowledge.search_chunks active_chunk ON active_chunk.id=(active_job.payload->>'chunkId')::uuid
+               WHERE active_job.project_id=j.project_id AND active_job.job_type='embed_chunk'
+                 AND active_job.state='processing' AND active_job.lease_expires_at>=now()
+                 AND active_chunk.content_hash=c.content_hash
+             )
+         ), candidates AS (
+           SELECT j.id FROM project_knowledge.outbox_jobs j
+           JOIN fair ON fair.id=j.id WHERE fair.project_rank=1
+           ORDER BY fair.priority DESC,fair.created_at
+           FOR UPDATE OF j SKIP LOCKED LIMIT $1
          )
          UPDATE project_knowledge.outbox_jobs jobs
-         SET state='processing',locked_at=now(),attempts=attempts+1
+         SET state='processing',locked_at=now(),attempts=attempts+1,
+             lease_owner=$2,heartbeat_at=now(),lease_expires_at=now()+interval '2 minutes'
          FROM project_knowledge.search_chunks chunks
          WHERE jobs.id IN (SELECT id FROM candidates)
            AND chunks.id=(jobs.payload->>'chunkId')::uuid
          RETURNING jobs.id,chunks.id AS chunk_id,chunks.project_id,chunks.content,chunks.content_hash`,
-        [limit],
+        [limit, this.workerId],
       )
     ).rows;
   }
@@ -169,6 +193,7 @@ export class EmbeddingQueueProcessor {
        ), completed_jobs AS (
          UPDATE project_knowledge.outbox_jobs j
          SET state='done',finished_at=now(),locked_at=NULL,last_error=NULL,
+             lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),
              resolution=jsonb_build_object('reason','embedded','contentHash',$2)
          WHERE j.job_type='embed_chunk' AND j.state IN ('pending','failed','processing')
            AND (j.payload->>'chunkId')::uuid IN (
@@ -186,7 +211,10 @@ export class EmbeddingQueueProcessor {
     const message = error instanceof Error ? error.message.slice(0, 500) : 'Embedding failed';
     await client.query(
       `UPDATE project_knowledge.outbox_jobs
-       SET state='failed',locked_at=NULL,last_error=$2,
+       SET state=CASE WHEN attempts>=max_attempts THEN 'dead' ELSE 'failed' END,
+           finished_at=CASE WHEN attempts>=max_attempts THEN now() ELSE NULL END,
+           locked_at=NULL,lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),last_error=$2,
+           resolution=CASE WHEN attempts>=max_attempts THEN jsonb_build_object('reason','max_attempts') ELSE resolution END,
            available_at=now()+make_interval(secs => LEAST(300,30*power(2,GREATEST(attempts-1,0)))::int)
        WHERE id=ANY($1::uuid[])`,
       [jobs.map(({ id }) => id), message],
@@ -206,6 +234,16 @@ export class EmbeddingQueueProcessor {
       if (representatives.length === 0)
         return { claimed: jobs.length, embedded: 0, applied: 0, failed: 0, ...swept };
       try {
+        const heartbeat = setInterval(() => {
+          void this.pool.query(
+            `UPDATE project_knowledge.outbox_jobs SET heartbeat_at=now(),
+               lease_expires_at=now()+interval '2 minutes'
+             WHERE id=ANY($1::uuid[]) AND lease_owner=$2 AND state='processing'`,
+            [jobs.map(({ id }) => id), this.workerId],
+          ).catch(() => undefined);
+        }, 15_000);
+        heartbeat.unref();
+        try {
         const vectors = this.embedder.embedMany
           ? await this.embedder.embedMany(representatives.map(({ content }) => content))
           : await Promise.all(representatives.map(({ content }) => this.embedder.embed(content)));
@@ -215,6 +253,9 @@ export class EmbeddingQueueProcessor {
         for (const [index, job] of representatives.entries())
           applied += await this.applyVector(client, job, vectors[index]!);
         return { claimed: jobs.length, embedded: representatives.length, applied, failed: 0, ...swept };
+        } finally {
+          clearInterval(heartbeat);
+        }
       } catch (error) {
         await this.fail(client, jobs, error);
         return { claimed: jobs.length, embedded: 0, applied: 0, failed: jobs.length, ...swept };

@@ -1134,10 +1134,18 @@ export class PgKnowledgeStore implements KnowledgeStore {
       ],
     );
     await client.query(
-      `INSERT INTO project_knowledge.outbox_jobs(project_id,job_type,payload)
-      VALUES($1,'embed_chunk',$2),($1,'publish_item',$3)
+      `INSERT INTO project_knowledge.outbox_jobs
+        (project_id,job_type,job_key,required_capability,payload)
+      VALUES($1,'embed_chunk',$2,'embedding',$3),
+            ($1,'publish_item',$4,'publish',$5)
       ON CONFLICT DO NOTHING`,
-      [projectId, { chunkId }, { itemId, version }],
+      [
+        projectId,
+        `embed:${chunkId}`,
+        { chunkId },
+        `publish:${itemId}:${version}`,
+        { itemId, version },
+      ],
     );
     if (change.operation === 'supersede' && change.supersedesId) {
       await client.query(

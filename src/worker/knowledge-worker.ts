@@ -36,6 +36,7 @@ export interface WorkerProject {
   projectKey: string;
   name: string;
   repositoryPath: string;
+  logicalRepositoryPath?: string;
   vaultPath: string;
 }
 
@@ -127,13 +128,14 @@ export class KnowledgeWorker {
 
   async reconcile(
     project: WorkerProject,
-    options: { primaryRepositoryPath?: string } = {},
+    options: { primaryRepositoryPath?: string; parentJobId?: string } = {},
   ): Promise<{ changed: boolean; snapshotId: string; indexedFiles: number }> {
     const fingerprint = await fingerprintWorktree(project.repositoryPath);
     const currentDirty = dirtyPaths(fingerprint.status);
-    const primaryRepositoryPath = path.resolve(
-      options.primaryRepositoryPath ?? fingerprint.root,
-    );
+    const logicalRepositoryPath =
+      project.logicalRepositoryPath ?? fingerprint.root;
+    const primaryRepositoryPath =
+      options.primaryRepositoryPath ?? logicalRepositoryPath;
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -172,7 +174,7 @@ export class KnowledgeWorker {
           [
             projectRow.project_id,
             repository.id,
-            fingerprint.root,
+            logicalRepositoryPath,
             fingerprint.branch,
             fingerprint.head,
             fingerprint.dirtyHash,
@@ -367,9 +369,15 @@ export class KnowledgeWorker {
             ],
           );
           await client.query(
-            `INSERT INTO project_knowledge.outbox_jobs(project_id,job_type,payload)
-            VALUES($1,'embed_chunk',$2) ON CONFLICT DO NOTHING`,
-            [projectRow.project_id, { chunkId: inserted.rows[0]!.id }],
+            `INSERT INTO project_knowledge.outbox_jobs
+              (project_id,job_type,job_key,required_capability,parent_job_id,payload)
+            VALUES($1,'embed_chunk',$2,'embedding',$3,$4) ON CONFLICT DO NOTHING`,
+            [
+              projectRow.project_id,
+              `embed:${inserted.rows[0]!.id}`,
+              options.parentJobId ?? null,
+              { chunkId: inserted.rows[0]!.id },
+            ],
           );
         }
         indexedFiles++;
@@ -1237,7 +1245,10 @@ export class KnowledgeWorker {
       JOIN project_knowledge.worktrees w ON w.id=s.worktree_id
       WHERE s.project_id=$1 AND s.state='active' AND w.path=$2
       ORDER BY s.activated_at DESC LIMIT 1`,
-        [projectRow.project_id, path.resolve(project.repositoryPath)],
+        [
+          projectRow.project_id,
+          project.logicalRepositoryPath ?? path.resolve(project.repositoryPath),
+        ],
       )
     ).rows[0];
     const architecture = (
