@@ -14,9 +14,26 @@ export function mapWindowsPathToContainer(
     relative.startsWith(`..${path.win32.sep}`) ||
     path.win32.isAbsolute(relative)
   )
-    throw new Error('Registered worktree is outside the configured projects root');
+    throw new Error(
+      'Registered worktree is outside the configured projects root',
+    );
   return path.posix.resolve(
     containerRoot,
     ...relative.split(path.win32.sep).filter(Boolean),
   );
+}
+
+export function mapPortableRelativePathToContainer(
+  relativePath: string,
+  containerRoot: string,
+): string {
+  const normalized = relativePath.replace(/\\/gu, '/');
+  if (
+    !normalized ||
+    normalized.startsWith('/') ||
+    normalized.split('/').some((part) => !part || part === '.' || part === '..')
+  ) {
+    throw new Error('Configured path must be a portable relative path');
+  }
+  return path.posix.join(containerRoot, normalized);
 }

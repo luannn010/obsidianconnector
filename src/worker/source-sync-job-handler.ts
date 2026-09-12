@@ -1,9 +1,11 @@
-import path from 'node:path';
 import type { Pool } from 'pg';
 import { fingerprintWorktree } from './git-worktree.js';
 import { KnowledgeWorker, type WorkerProject } from './knowledge-worker.js';
 import type { SharedJob } from './shared-job-queue.js';
-import { mapWindowsPathToContainer } from './worker-path-mapper.js';
+import {
+  mapPortableRelativePathToContainer,
+  mapWindowsPathToContainer,
+} from './worker-path-mapper.js';
 
 export interface SourceSyncResolution {
   syncRunId: string;
@@ -32,10 +34,12 @@ export class SourceSyncJobHandler {
       await this.pool.query<{
         project_key: string;
         name: string;
+        vault_relative_path: string;
         worktree_path: string;
         repository_path: string;
       }>(
-        `SELECT project.project_key,project.name,worktree.path AS worktree_path,
+        `SELECT project.project_key,project.name,project.vault_relative_path,
+                worktree.path AS worktree_path,
                 repository.root_path AS repository_path
          FROM project_knowledge.worktrees worktree
          JOIN project_knowledge.projects project ON project.project_id=worktree.project_id
@@ -55,14 +59,25 @@ export class SourceSyncJobHandler {
       name: target.name,
       repositoryPath: containerWorktree,
       logicalRepositoryPath: target.worktree_path,
-      vaultPath: path.posix.join(this.vaultsContainerRoot, target.project_key),
+      vaultPath: mapPortableRelativePathToContainer(
+        target.vault_relative_path || target.project_key,
+        this.vaultsContainerRoot,
+      ),
     };
     const initial = await fingerprintWorktree(containerWorktree);
-    const run = (await this.pool.query<{ id: string }>(
-      `INSERT INTO project_knowledge.sync_runs(project_id,status,summary)
+    const run = (
+      await this.pool.query<{ id: string }>(
+        `INSERT INTO project_knowledge.sync_runs(project_id,status,summary)
        VALUES($1,'running',$2::jsonb) RETURNING id`,
-      [job.project_id, JSON.stringify({ parentJobId: job.id, requestedFingerprint: initial })],
-    )).rows[0]!;
+        [
+          job.project_id,
+          JSON.stringify({
+            parentJobId: job.id,
+            requestedFingerprint: initial,
+          }),
+        ],
+      )
+    ).rows[0]!;
     try {
       const worker = new KnowledgeWorker(this.pool);
       const source = await worker.reconcile(project, {
@@ -78,25 +93,30 @@ export class SourceSyncJobHandler {
         throw new Error('Source changed during synchronization');
       const childJobs = (
         await this.pool.query<{ pending: number; failed: number }>(
-        `SELECT count(*) FILTER(WHERE state IN ('pending','processing')) AS pending,
+          `SELECT count(*) FILTER(WHERE state IN ('pending','processing')) AS pending,
                 count(*) FILTER(WHERE state IN ('failed','dead')) AS failed
          FROM project_knowledge.outbox_jobs WHERE parent_job_id=$1`,
-        [job.id],
+          [job.id],
         )
       ).rows[0] ?? { pending: 0, failed: 0 };
-      const queue = (await this.pool.query<{ pending: number; failed: number }>(
-        `SELECT count(*) FILTER(WHERE state IN ('pending','processing')) AS pending,
+      const queue = (
+        await this.pool.query<{ pending: number; failed: number }>(
+          `SELECT count(*) FILTER(WHERE state IN ('pending','processing')) AS pending,
                 count(*) FILTER(WHERE state IN ('failed','dead')) AS failed
          FROM project_knowledge.outbox_jobs WHERE project_id=$1`,
-        [job.project_id],
-      )).rows[0] ?? { pending: 0, failed: 0 };
+          [job.project_id],
+        )
+      ).rows[0] ?? { pending: 0, failed: 0 };
       const resolution: SourceSyncResolution = {
         syncRunId: run.id,
         fingerprint: { head: final.head, dirtyHash: final.dirtyHash },
         snapshotId: source.snapshotId,
         snapshotState: source.changed ? 'created' : 'reused',
         indexedFiles: source.indexedFiles,
-        childJobs: { pending: Number(childJobs.pending ?? 0), failed: Number(childJobs.failed ?? 0) },
+        childJobs: {
+          pending: Number(childJobs.pending ?? 0),
+          failed: Number(childJobs.failed ?? 0),
+        },
         pendingCount: Number(queue.pending ?? 0),
         failures: Number(queue.failed ?? 0),
         projection,
@@ -109,7 +129,12 @@ export class SourceSyncJobHandler {
     } catch (error) {
       await this.pool.query(
         `UPDATE project_knowledge.sync_runs SET status='failed',finished_at=now(),summary=summary||$2::jsonb WHERE id=$1`,
-        [run.id, JSON.stringify({ error: error instanceof Error ? error.message : String(error) })],
+        [
+          run.id,
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        ],
       );
       throw error;
     }

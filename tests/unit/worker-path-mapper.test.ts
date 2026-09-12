@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { mapWindowsPathToContainer } from '../../src/worker/worker-path-mapper.js';
+import {
+  mapPortableRelativePathToContainer,
+  mapWindowsPathToContainer,
+} from '../../src/worker/worker-path-mapper.js';
 
 describe('worker path mapping', () => {
   it('maps a registered Windows worktree below the configured root', () => {
@@ -20,5 +23,14 @@ describe('worker path mapping', () => {
         '/projects',
       ),
     ).toThrow('outside');
+  });
+
+  it('maps a portable vault-relative path and rejects traversal', () => {
+    expect(mapPortableRelativePathToContainer('Host-Mesh', '/vaults')).toBe(
+      '/vaults/Host-Mesh',
+    );
+    expect(() =>
+      mapPortableRelativePathToContainer('../private', '/vaults'),
+    ).toThrow('relative');
   });
 });

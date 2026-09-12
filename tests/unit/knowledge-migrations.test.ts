@@ -63,7 +63,9 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('required_capability');
     expect(sql).toContain('lease_expires_at');
     expect(sql).toContain('outbox_jobs_one_live_key');
-    expect(knowledgeMigrations.at(-1)?.id).toBe('0007_shared_worker_queue');
+    expect(knowledgeMigrations.at(-1)?.id).toBe('0008_project_setup');
+    expect(sql).toContain('vault_name text');
+    expect(sql).toContain('vault_relative_path text');
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);

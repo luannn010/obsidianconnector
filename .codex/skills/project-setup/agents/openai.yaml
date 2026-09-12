@@ -1,0 +1,6 @@
+interface:
+  display_name: 'Project Setup'
+  short_description: 'Register a project, vault, database, and snapshot'
+  default_prompt: 'Use $project-setup to initialize this project for Obsidian-backed project knowledge.'
+policy:
+  allow_implicit_invocation: true

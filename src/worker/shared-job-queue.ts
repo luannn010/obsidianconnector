@@ -1,11 +1,7 @@
 import type { Pool } from 'pg';
 
 export type WorkerCapability =
-  | 'source-sync'
-  | 'publish'
-  | 'embedding'
-  | 'maintenance'
-  | 'scheduler';
+  'source-sync' | 'publish' | 'embedding' | 'maintenance' | 'scheduler';
 
 export interface SharedJob {
   id: string;
@@ -45,7 +41,8 @@ export class SharedJobQueue {
             version: 1,
             jobType: 'source_sync',
             worktreeId,
-            requestedBy: reason === 'on_demand' ? 'windows-cli' : 'debian-scheduler',
+            requestedBy:
+              reason === 'on_demand' ? 'windows-cli' : 'debian-scheduler',
             reason,
           }),
         ],
@@ -59,6 +56,7 @@ export class SharedJobQueue {
     workerId: string,
     limit: number,
     leaseSeconds = 120,
+    options: { sourceWorktreeId?: string } = {},
   ): Promise<SharedJob[]> {
     if (capabilities.length === 0) return [];
     const client = await this.pool.connect();
@@ -71,6 +69,7 @@ export class SharedJobQueue {
                     row_number() OVER (PARTITION BY project_id ORDER BY priority DESC,created_at,id) AS project_rank
              FROM project_knowledge.outbox_jobs
              WHERE required_capability=ANY($1::text[]) AND available_at<=now()
+               AND ($5::text IS NULL OR job_type<>'source_sync' OR payload->>'worktreeId'=$5)
                AND attempts<max_attempts
                AND (state IN ('pending','failed') OR
                     (state='processing' AND lease_expires_at<now()))
@@ -88,7 +87,13 @@ export class SharedJobQueue {
            WHERE job.id IN (SELECT id FROM candidates)
            RETURNING job.id,job.project_id,job.job_type,job.payload,job.job_key,
                      job.required_capability,job.attempts,job.max_attempts`,
-          [capabilities, limit, workerId, leaseSeconds],
+          [
+            capabilities,
+            limit,
+            workerId,
+            leaseSeconds,
+            options.sourceWorktreeId ?? null,
+          ],
         )
       ).rows;
       await client.query('COMMIT');
@@ -101,7 +106,11 @@ export class SharedJobQueue {
     }
   }
 
-  async renew(jobId: string, workerId: string, leaseSeconds = 120): Promise<boolean> {
+  async renew(
+    jobId: string,
+    workerId: string,
+    leaseSeconds = 120,
+  ): Promise<boolean> {
     const result = await this.pool.query(
       `UPDATE project_knowledge.outbox_jobs SET heartbeat_at=now(),
          lease_expires_at=now()+make_interval(secs=>$3)
@@ -111,7 +120,11 @@ export class SharedJobQueue {
     return (result.rowCount ?? 0) === 1;
   }
 
-  async complete(jobId: string, workerId: string, resolution: object): Promise<void> {
+  async complete(
+    jobId: string,
+    workerId: string,
+    resolution: object,
+  ): Promise<void> {
     await this.pool.query(
       `UPDATE project_knowledge.outbox_jobs
        SET state='done',finished_at=now(),lease_owner=NULL,lease_expires_at=NULL,
@@ -123,7 +136,10 @@ export class SharedJobQueue {
   }
 
   async fail(job: SharedJob, workerId: string, error: unknown): Promise<void> {
-    const message = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+    const message =
+      error instanceof Error
+        ? error.message.slice(0, 500)
+        : String(error).slice(0, 500);
     const terminal = job.attempts >= job.max_attempts;
     await this.pool.query(
       `UPDATE project_knowledge.outbox_jobs
@@ -152,9 +168,26 @@ export class SharedJobQueue {
     return recovered.rowCount ?? 0;
   }
 
-  async find(jobId: string): Promise<(SharedJob & { state: string; resolution: Record<string, unknown>; lease_owner: string | null; last_error: string | null }) | undefined> {
+  async find(
+    jobId: string,
+  ): Promise<
+    | (SharedJob & {
+        state: string;
+        resolution: Record<string, unknown>;
+        lease_owner: string | null;
+        last_error: string | null;
+      })
+    | undefined
+  > {
     return (
-      await this.pool.query<SharedJob & { state: string; resolution: Record<string, unknown>; lease_owner: string | null; last_error: string | null }>(
+      await this.pool.query<
+        SharedJob & {
+          state: string;
+          resolution: Record<string, unknown>;
+          lease_owner: string | null;
+          last_error: string | null;
+        }
+      >(
         `SELECT id,project_id,job_type,payload,job_key,required_capability,attempts,max_attempts,
                 state,resolution,lease_owner,last_error
          FROM project_knowledge.outbox_jobs WHERE id=$1`,

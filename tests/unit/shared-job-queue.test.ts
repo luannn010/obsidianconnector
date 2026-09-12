@@ -23,22 +23,60 @@ describe('SharedJobQueue', () => {
     const client = {
       query: vi.fn(async (sql: string) =>
         sql.includes('RETURNING job.')
-          ? { rows: [{ id: 'job-1', project_id: 'p1', job_type: 'embed_chunk', payload: {} }] }
+          ? {
+              rows: [
+                {
+                  id: 'job-1',
+                  project_id: 'p1',
+                  job_type: 'embed_chunk',
+                  payload: {},
+                },
+              ],
+            }
           : { rows: [] },
       ),
       release: vi.fn(),
     };
-    const queue = new SharedJobQueue({ connect: async () => client } as unknown as Pool);
-    await expect(queue.claim(['embedding'], 'worker-1', 2, 120)).resolves.toHaveLength(1);
-    const sql = client.query.mock.calls.map(([statement]) => statement).join('\n');
+    const queue = new SharedJobQueue({
+      connect: async () => client,
+    } as unknown as Pool);
+    await expect(
+      queue.claim(['embedding'], 'worker-1', 2, 120),
+    ).resolves.toHaveLength(1);
+    const sql = client.query.mock.calls
+      .map(([statement]) => statement)
+      .join('\n');
     expect(sql).toContain('row_number() OVER (PARTITION BY');
     expect(sql).toContain('fair.project_rank=1');
     expect(sql).toContain('SKIP LOCKED');
     expect(sql).toContain('lease_expires_at');
   });
 
+  it('can restrict source claims to one mounted worktree', async () => {
+    const client = {
+      query: vi.fn(async (...args: [string, unknown[]?]) => {
+        void args;
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const queue = new SharedJobQueue({
+      connect: async () => client,
+    } as unknown as Pool);
+    await queue.claim(['source-sync'], 'worker-1', 1, 120, {
+      sourceWorktreeId: 'worktree-1',
+    });
+    const claim = client.query.mock.calls.find(([sql]) =>
+      String(sql).includes('row_number() OVER'),
+    );
+    expect(claim?.[0]).toContain("payload->>'worktreeId'");
+    expect(claim?.[1]).toContain('worktree-1');
+  });
+
   it('requeues expired portable jobs but never changes their required capability', async () => {
-    const pool = { query: vi.fn(async () => ({ rows: [], rowCount: 2 })) } as unknown as Pool;
+    const pool = {
+      query: vi.fn(async () => ({ rows: [], rowCount: 2 })),
+    } as unknown as Pool;
     const queue = new SharedJobQueue(pool);
     await expect(queue.recoverExpiredLeases()).resolves.toBe(2);
     const [sql] = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0]!;
