@@ -147,7 +147,27 @@ try {
     $receiptJson = & $node (Join-Path $repoRoot 'dist\request-source-sync.js') --wait $setup.jobId --timeout-seconds $TimeoutSeconds
     if ($LASTEXITCODE -ne 0) { throw 'Initial source synchronization did not complete' }
     $receipt = $receiptJson | ConvertFrom-Json
-    [ordered]@{ state = 'completed'; setup = $setup; receipt = $receipt } | ConvertTo-Json -Depth 10 -Compress
+    $auditJson = & $node (Join-Path $repoRoot 'dist\project-setup-audit.js') `
+      --project-key $ProjectKey `
+      --worktree-path $resolvedProject `
+      --expected-snapshot-id $receipt.snapshotId `
+      --expected-worktree-id $setup.worktreeId 2>&1
+    $auditExitCode = $LASTEXITCODE
+    $audit = try {
+      $auditJson | ConvertFrom-Json
+    } catch {
+      [ordered]@{
+        state = 'failed'
+        checks = [ordered]@{ databaseConnected = $false; snapshotReadable = $false }
+        error = 'Post-setup database audit returned an invalid response'
+      }
+    }
+    [ordered]@{
+      state = if ($auditExitCode -eq 0 -and $audit.state -eq 'passed') { 'completed' } else { 'completed_with_issues' }
+      setup = $setup
+      receipt = $receipt
+      audit = $audit
+    } | ConvertTo-Json -Depth 12 -Compress
   } finally {
     if ($runtimeFile) { Remove-Item -LiteralPath $runtimeFile -Force -ErrorAction SilentlyContinue }
   }

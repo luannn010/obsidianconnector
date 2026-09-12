@@ -168,6 +168,7 @@ async function runSetup(
         'ensure_git_head',
         'register_project_worktree',
         'enqueue_source_sync',
+        'audit_active_snapshot_and_sync_status',
       ],
     };
   }

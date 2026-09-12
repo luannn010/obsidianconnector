@@ -22,6 +22,7 @@
     "knowledge:shared-worker": "tsx src/shared-worker.ts",
     "knowledge:request-sync": "tsx src/request-source-sync.ts",
     "knowledge:setup-project": "tsx src/setup-project.ts",
+    "knowledge:audit-project-setup": "tsx src/project-setup-audit.ts",
     "knowledge:queue-health": "tsx src/queue-health.ts",
     "knowledge:sync-project": "tsx src/sync-project.ts",
     "knowledge:activity": "tsx src/activity-server.ts",

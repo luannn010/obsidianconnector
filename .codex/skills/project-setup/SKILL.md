@@ -15,9 +15,10 @@ Use the repository's deterministic setup script. Keep credentials out of message
 4. Run `scripts/setup-project.ps1 -WhatIf` and review its JSON before applying changes.
 5. The script checks the user and repository environment files. If the database connection is absent, let the script request it with a secure prompt; never ask the user to paste a password into chat.
 6. Run `scripts/setup-project.ps1 -Wait` with the confirmed paths. Respect its conflict errors instead of rebinding an existing project key.
-7. Report the project key, vault, worktree ID, snapshot ID and created/reused state, pending child jobs, and failures from the receipt.
+7. After the source-sync receipt arrives, let the script perform its post-setup database audit. It reads the active snapshot through `getProjectSnapshot`, compares its snapshot and worktree IDs with the worker receipt and registration, then reads compact `getProjectSyncStatus` data.
+8. Report the project key, vault, worktree ID, snapshot ID and created/reused state, database audit state, pending child jobs, failed jobs, and every item in `audit.problems`. A `completed_with_issues` result means initialization finished but the reported problems still need repair.
 
-The setup is idempotent. It preserves existing notes and project configuration, creates an empty Git bootstrap commit only when no `HEAD` exists, and queues at most one live source job for the worktree.
+The setup is idempotent. It preserves existing notes and project configuration, creates an empty Git bootstrap commit only when no `HEAD` exists, and queues at most one live source job for the worktree. The post-setup audit is deterministic and uses PostgreSQL directly, so it consumes no conversational AI tokens.
 
 For this connector repository, invoke:
 
