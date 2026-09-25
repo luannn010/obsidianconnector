@@ -1,16 +1,56 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { KnowledgeStore } from '../knowledge/types.js';
+import type {
+  KnowledgeStore,
+  ProjectSyncActionRunner,
+} from '../knowledge/types.js';
 import { runTool } from './tool-utils.js';
 
 const projectKey = z.string();
 const maxTokens = (fallback: number, maximum: number) =>
   z.number().int().min(100).max(maximum).default(fallback);
 const filters = z.record(z.array(z.string())).optional();
+const knowledgeChangeItemSchema = z.object({
+  id: z.string().optional(),
+  stableKey: z.string().optional(),
+  kind: z.string(),
+  title: z.string().optional(),
+  bodyMarkdown: z.string().optional(),
+  deliveryStatus: z.string().optional(),
+  verificationStatus: z.string().optional(),
+  domain: z.string().optional(),
+  service: z.string().optional(),
+  properties: z.record(z.unknown()).optional(),
+});
+const knowledgeEvidenceSchema = z.object({
+  snapshotId: z.string(),
+  ref: z.string(),
+  locatorType: z
+    .enum(['path', 'symbol', 'endpoint', 'table', 'migration', 'test'])
+    .optional(),
+  required: z.boolean().optional(),
+  verificationScope: z.enum(['required', 'warning']).optional(),
+});
+const knowledgeChangeObjectSchema = z.object({
+  operation: z.enum(['create', 'patch', 'append', 'supersede']),
+  expectedVersion: z.number().int().min(0).optional(),
+  supersedesId: z.string().optional(),
+  evidence: z.array(knowledgeEvidenceSchema).optional(),
+  item: knowledgeChangeItemSchema,
+});
+const knowledgeChangeSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}, knowledgeChangeObjectSchema);
 
 export function registerKnowledgeTools(
   server: McpServer,
   knowledge: KnowledgeStore,
+  syncActions?: ProjectSyncActionRunner,
 ): void {
   server.registerTool(
     'get_project_snapshot',
@@ -90,7 +130,7 @@ export function registerKnowledgeTools(
         actor: z.string(),
         taskId: z.string().optional(),
         expectedProjectRevision: z.number().int().min(0).optional(),
-        changes: z.array(z.any()).min(1).max(20),
+        changes: z.array(knowledgeChangeSchema).min(1).max(20),
       },
     },
     async (input) =>
@@ -118,6 +158,62 @@ export function registerKnowledgeTools(
         () => knowledge.getProjectSyncStatus(input),
         (data) =>
           `${data.sourceFreshness}; ${data.topSuggestedActions?.length ?? 0} action(s), ${data.queues.pending} pending, ${data.queues.failed} failed${data.cacheKey ? `; cache ${data.cacheKey}` : ''}`,
+      ),
+  );
+
+  if (!syncActions) return;
+
+  server.registerTool(
+    'finalize_projection',
+    {
+      description:
+        'Finalize pending SQL-backed project knowledge into generated Obsidian Published notes. Blocks on failed jobs, projection conflicts, or non-projection actions.',
+      inputSchema: {
+        projectKey,
+        worktreePath: z.string(),
+        vaultPath: z.string().optional(),
+        timeoutSeconds: z.number().int().positive().max(1800).default(300),
+        pollSeconds: z.number().int().positive().max(60).default(5),
+        localEmbeddingFallback: z.boolean().default(false),
+      },
+    },
+    async (input) =>
+      runTool(
+        () => syncActions.finalizeProjection(input),
+        (data) => {
+          const result = data as { state?: string; dbRevision?: number };
+          return `Projection ${result.state ?? 'finished'} at revision ${result.dbRevision ?? 'unknown'}`;
+        },
+      ),
+  );
+
+  server.registerTool(
+    'run_project_sync_action',
+    {
+      description:
+        'Run a safe get_project_sync_status suggested action. V1 supports REINDEX_SOURCE and FINALIZE_PROJECTION only; semantic knowledge updates still use write_project_knowledge with chunk refs.',
+      inputSchema: {
+        projectKey,
+        action: z.enum(['REINDEX_SOURCE', 'FINALIZE_PROJECTION']),
+        actionId: z.string().optional(),
+        worktreePath: z.string(),
+        vaultPath: z.string().optional(),
+        timeoutSeconds: z.number().int().positive().max(1800).default(300),
+        pollSeconds: z.number().int().positive().max(60).default(5),
+        localEmbeddingFallback: z.boolean().default(false),
+      },
+    },
+    async (input) =>
+      runTool(
+        () => syncActions.runProjectSyncAction(input),
+        (data) => {
+          const result = data as {
+            state?: string;
+            executedActions?: string[];
+            dbRevision?: number;
+          };
+          return `Sync action ${result.state ?? 'finished'} (${result.executedActions?.join(', ') || 'none'}) at revision ${result.dbRevision ?? 'unknown'}`;
+        },
       ),
   );
 }

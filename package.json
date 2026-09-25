@@ -21,6 +21,7 @@
     "knowledge:queue-worker": "tsx src/queue-worker.ts",
     "knowledge:queue-health": "tsx src/queue-health.ts",
     "knowledge:sync-project": "tsx src/sync-project.ts",
+    "knowledge:finalize-projection": "tsx src/finalize-projection.ts",
     "knowledge:activity": "tsx src/activity-server.ts",
     "knowledge:hook": "tsx src/activity-hook.ts"
   },

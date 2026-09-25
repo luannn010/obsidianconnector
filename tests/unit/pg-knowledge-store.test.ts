@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { KnowledgeError } from '../../src/knowledge/errors.js';
 import {
   PgKnowledgeStore,
+  type PgClientLike,
   type PgPoolLike,
   type PgQueryResult,
 } from '../../src/knowledge/pg-store.js';
@@ -182,6 +183,63 @@ describe('PostgreSQL knowledge store', () => {
     expect(client.statements[0]).toBe('BEGIN');
     expect(client.statements.at(-1)).toBe('ROLLBACK');
     expect(client.released).toBe(true);
+  });
+
+  it('validates knowledge change items before opening a DB transaction', async () => {
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('should not connect');
+      },
+      query: async () => ({ rows: [] }),
+    };
+    await expect(
+      new PgKnowledgeStore(pool).writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        changes: [{ operation: 'create', item: null as unknown as never }],
+      }),
+    ).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+      retryable: false,
+    } satisfies Partial<KnowledgeError>);
+  });
+
+  it('rejects writes with create/update change missing kind', async () => {
+    const clientRows = [{ project_id: 'project-1', db_revision: 1 }];
+    const client: PgClientLike = {
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('project_knowledge.projects'))
+          return { rows: clientRows as unknown as Row[] };
+        if (sql.includes('FOR UPDATE OF i'))
+          return { rows: [] as unknown as Row[] };
+        return { rows: [] as unknown as Row[] };
+      },
+      release: () => {},
+    };
+    const pool: PgPoolLike = {
+      connect: async () => client,
+      query: client.query,
+    };
+    await expect(
+      new PgKnowledgeStore(pool).writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        changes: [
+          {
+            operation: 'create',
+            item: {
+              title: 'Missing kind',
+              bodyMarkdown: 'No kind field',
+            } as never,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+      retryable: false,
+    } satisfies Partial<KnowledgeError>);
   });
 
   it('does not rerank exact lookup results', async () => {

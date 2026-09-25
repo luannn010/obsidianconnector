@@ -13,12 +13,16 @@ import { registerObsidianTools } from './tools/obsidian-tools.js';
 import { registerProjectTools } from './tools/project-tools.js';
 import { registerVaultTools } from './tools/vault-tools.js';
 import type { ToolContext } from './tools/tool-utils.js';
-import type { KnowledgeStore } from './knowledge/types.js';
+import type {
+  KnowledgeStore,
+  ProjectSyncActionRunner,
+} from './knowledge/types.js';
 import { registerKnowledgeTools } from './tools/knowledge-tools.js';
 
 export interface ServerOptions {
   profile?: 'standard' | 'admin';
   knowledge?: KnowledgeStore;
+  syncActions?: ProjectSyncActionRunner;
 }
 
 export function createServer(
@@ -46,7 +50,7 @@ export function createServer(
         'The standard profile requires a project knowledge store',
       );
     }
-    registerKnowledgeTools(server, options.knowledge);
+    registerKnowledgeTools(server, options.knowledge, options.syncActions);
     return server;
   }
   registerVaultTools(server, context);

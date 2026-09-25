@@ -74,6 +74,10 @@ function safeErrorMessage(error: unknown): string {
     return 'Note content hash does not match expected hash';
   if (message.startsWith('Vault directory does not exist'))
     return 'Vault directory does not exist';
+  if (message.startsWith('The local project knowledge worker'))
+    return message;
+  if (message.startsWith('Source changed during synchronization'))
+    return message;
   if (message.startsWith('Atomic replacement'))
     return 'Atomic write could not be completed';
   if (message.startsWith('Only regular Markdown files'))

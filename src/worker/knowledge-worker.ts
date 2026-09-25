@@ -127,7 +127,7 @@ export class KnowledgeWorker {
 
   async reconcile(
     project: WorkerProject,
-    options: { primaryRepositoryPath?: string } = {},
+    options: { primaryRepositoryPath?: string; parentJobId?: string } = {},
   ): Promise<{ changed: boolean; snapshotId: string; indexedFiles: number }> {
     const fingerprint = await fingerprintWorktree(project.repositoryPath);
     const currentDirty = dirtyPaths(fingerprint.status);
@@ -367,9 +367,15 @@ export class KnowledgeWorker {
             ],
           );
           await client.query(
-            `INSERT INTO project_knowledge.outbox_jobs(project_id,job_type,payload)
-            VALUES($1,'embed_chunk',$2) ON CONFLICT DO NOTHING`,
-            [projectRow.project_id, { chunkId: inserted.rows[0]!.id }],
+            `INSERT INTO project_knowledge.outbox_jobs
+              (project_id,job_type,job_key,required_capability,parent_job_id,payload)
+            VALUES($1,'embed_chunk',$2,'embedding',$3,$4) ON CONFLICT DO NOTHING`,
+            [
+              projectRow.project_id,
+              `embed:${inserted.rows[0]!.id}`,
+              options.parentJobId ?? null,
+              { chunkId: inserted.rows[0]!.id },
+            ],
           );
         }
         indexedFiles++;

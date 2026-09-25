@@ -235,6 +235,33 @@ export interface ProjectSyncStatus {
   domainSync?: DomainSyncStatus;
 }
 
+export type ProjectSyncRunnableAction = 'REINDEX_SOURCE' | 'FINALIZE_PROJECTION';
+
+export interface ProjectSyncActionInput {
+  projectKey: string;
+  action: ProjectSyncRunnableAction;
+  actionId?: string;
+  worktreePath: string;
+  vaultPath?: string;
+  timeoutSeconds: number;
+  pollSeconds: number;
+  localEmbeddingFallback: boolean;
+}
+
+export interface FinalizeProjectionInput {
+  projectKey: string;
+  worktreePath: string;
+  vaultPath?: string;
+  timeoutSeconds: number;
+  pollSeconds: number;
+  localEmbeddingFallback: boolean;
+}
+
+export interface ProjectSyncActionRunner {
+  finalizeProjection(input: FinalizeProjectionInput): Promise<object>;
+  runProjectSyncAction(input: ProjectSyncActionInput): Promise<object>;
+}
+
 export interface KnowledgeStore {
   getProjectSnapshot(input: ProjectSnapshotInput): Promise<ProjectSnapshot>;
   searchProjectContext(

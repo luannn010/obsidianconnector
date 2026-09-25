@@ -58,7 +58,11 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain("state IN ('pending','failed','processing')");
     expect(sql).toContain('outbox_jobs_one_live_embedding');
     expect(sql).toContain('search_chunks_embedding_reuse');
-    expect(knowledgeMigrations.at(-1)?.id).toBe('0006_queue_worker_health');
+    expect(sql).toContain('job_key text');
+    expect(sql).toContain('required_capability text');
+    expect(sql).toContain('parent_job_id uuid');
+    expect(sql).toContain('outbox_jobs_one_live_key');
+    expect(knowledgeMigrations.at(-1)?.id).toBe('0007_shared_worker_queue');
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);

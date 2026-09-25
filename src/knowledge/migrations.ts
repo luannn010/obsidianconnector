@@ -488,4 +488,80 @@ CREATE INDEX IF NOT EXISTS worker_health_heartbeat
   ON project_knowledge.worker_health(worker_role,heartbeat_at DESC);
 `,
   },
+  {
+    id: '0007_shared_worker_queue',
+    sql: String.raw`
+ALTER TABLE project_knowledge.outbox_jobs
+  ADD COLUMN IF NOT EXISTS job_key text,
+  ADD COLUMN IF NOT EXISTS required_capability text,
+  ADD COLUMN IF NOT EXISTS priority integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS lease_owner text,
+  ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
+  ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz,
+  ADD COLUMN IF NOT EXISTS parent_job_id uuid REFERENCES project_knowledge.outbox_jobs(id),
+  ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 5;
+
+UPDATE project_knowledge.outbox_jobs
+SET job_key=COALESCE(job_key,
+      CASE job_type WHEN 'embed_chunk' THEN 'embed:'||(payload->>'chunkId')
+                    WHEN 'publish_item' THEN 'publish:'||(payload->>'itemId')
+                    ELSE job_type||':'||id::text END),
+    required_capability=COALESCE(required_capability,
+      CASE job_type WHEN 'embed_chunk' THEN 'embedding'
+                    WHEN 'publish_item' THEN 'publish'
+                    ELSE 'maintenance' END)
+WHERE job_key IS NULL OR required_capability IS NULL;
+
+ALTER TABLE project_knowledge.outbox_jobs
+  ALTER COLUMN job_key SET NOT NULL,
+  ALTER COLUMN required_capability SET NOT NULL;
+
+UPDATE project_knowledge.outbox_jobs
+SET lease_expires_at=COALESCE(locked_at,now())
+WHERE state='processing' AND lease_expires_at IS NULL;
+
+WITH duplicates AS (
+  SELECT id,row_number() OVER (
+    PARTITION BY project_id,job_type,job_key ORDER BY priority DESC,created_at,id
+  ) AS duplicate_rank
+  FROM project_knowledge.outbox_jobs
+  WHERE state IN ('pending','failed','processing')
+)
+UPDATE project_knowledge.outbox_jobs job
+SET state='superseded',finished_at=now(),
+    resolution=jsonb_build_object('reason','duplicate_live_job')
+FROM duplicates WHERE duplicates.id=job.id AND duplicates.duplicate_rank>1;
+
+DROP INDEX IF EXISTS project_knowledge.outbox_jobs_one_live_embedding;
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_jobs_one_live_key
+  ON project_knowledge.outbox_jobs(project_id,job_type,job_key)
+  WHERE state IN ('pending','failed','processing');
+CREATE INDEX IF NOT EXISTS outbox_jobs_capability_claim
+  ON project_knowledge.outbox_jobs(required_capability,available_at,priority DESC,created_at)
+  WHERE state IN ('pending','failed','processing');
+
+CREATE TABLE IF NOT EXISTS project_knowledge.worker_instances (
+  worker_id text PRIMARY KEY,
+  host_kind text NOT NULL CHECK(host_kind IN ('windows','debian')),
+  capabilities text[] NOT NULL,
+  release_id text,
+  heartbeat_at timestamptz NOT NULL DEFAULT now(),
+  current_job_id uuid REFERENCES project_knowledge.outbox_jobs(id),
+  processed_count bigint NOT NULL DEFAULT 0,
+  failed_count bigint NOT NULL DEFAULT 0,
+  last_error text,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS worker_instances_live
+  ON project_knowledge.worker_instances(host_kind,heartbeat_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.worker_scheduler_state (
+  scheduler_key text PRIMARY KEY,
+  last_run_at timestamptz,
+  next_run_at timestamptz NOT NULL DEFAULT now(),
+  last_worker_id text,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+`,
+  },
 ];
