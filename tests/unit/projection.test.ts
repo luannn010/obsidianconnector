@@ -5,6 +5,7 @@ import matter from 'gray-matter';
 import { afterEach, describe, expect, it } from 'vitest';
 import { projectionHash } from '../../src/knowledge/hash.js';
 import {
+  archiveProjection,
   publishProjection,
   removeProjection,
   renderManagedNote,
@@ -146,13 +147,63 @@ describe('managed Obsidian projections', () => {
       published.observedHash,
     );
     expect(removed).toEqual({ removed: true });
-    await expect(readFile(path.join(root, relativePath), 'utf8')).rejects.toThrow();
+    await expect(
+      readFile(path.join(root, relativePath), 'utf8'),
+    ).rejects.toThrow();
 
     await publishProjection(root, relativePath, rendered);
     const target = path.join(root, relativePath);
     await writeFile(target, `${rendered}\nmanual note`);
-    const preserved = await removeProjection(root, relativePath, published.observedHash);
+    const preserved = await removeProjection(
+      root,
+      relativePath,
+      published.observedHash,
+    );
     expect(preserved.preservedPath).toContain('Inbox');
-    expect(await readFile(preserved.preservedPath!, 'utf8')).toContain('manual note');
+    expect(await readFile(preserved.preservedPath!, 'utf8')).toContain(
+      'manual note',
+    );
+  });
+
+  it('archives only intact managed worktree notes', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'projection-archive-'));
+    roots.push(root);
+    const rendered = renderManagedNote({
+      viewId: 'worktree:one:now',
+      projectId: 'p1',
+      viewType: 'worktree-now',
+      dbRevision: 2,
+      body: '# Worktree',
+    });
+    const source = 'Published/Worktrees/old--12345678/Now.md';
+    const published = await publishProjection(root, source, rendered);
+
+    const archived = await archiveProjection(
+      root,
+      source,
+      'Archive/Worktrees/old--12345678/Now.md',
+      published.observedHash,
+    );
+    expect(archived).toMatchObject({ archived: true, conflicted: false });
+    await expect(readFile(path.join(root, source), 'utf8')).rejects.toThrow();
+    await expect(
+      readFile(path.join(root, archived.archivePath!), 'utf8'),
+    ).resolves.toContain('# Worktree');
+
+    await publishProjection(root, source, rendered);
+    await writeFile(path.join(root, source), `${rendered}\nmanual`);
+    const conflicted = await archiveProjection(
+      root,
+      source,
+      'Archive/Worktrees/old--12345678/Now.md',
+      published.observedHash,
+    );
+    expect(conflicted).toMatchObject({ archived: false, conflicted: true });
+    await expect(readFile(path.join(root, source), 'utf8')).resolves.toContain(
+      'manual',
+    );
+    await expect(
+      readFile(conflicted.preservedPath!, 'utf8'),
+    ).resolves.toContain('manual');
   });
 });

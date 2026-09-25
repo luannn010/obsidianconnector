@@ -93,6 +93,14 @@ export interface ExpandProjectContextInput {
 }
 
 export type KnowledgeOperation = 'create' | 'patch' | 'append' | 'supersede';
+export type KnowledgeChangeReason =
+  | 'progress'
+  | 'status_change'
+  | 'decision'
+  | 'correction'
+  | 'evidence_refresh'
+  | 'risk'
+  | 'supersede';
 export interface KnowledgeEvidenceInput {
   snapshotId: string;
   ref: string;
@@ -103,12 +111,13 @@ export interface KnowledgeEvidenceInput {
 export interface KnowledgeChange {
   operation: KnowledgeOperation;
   expectedVersion?: number;
+  expectedHash?: string;
   supersedesId?: string;
   evidence?: KnowledgeEvidenceInput[];
   item: {
     id?: string;
     stableKey?: string;
-    kind: string;
+    kind?: string;
     title?: string;
     bodyMarkdown?: string;
     deliveryStatus?: string;
@@ -123,6 +132,9 @@ export interface WriteProjectKnowledgeInput {
   projectKey: string;
   actor: string;
   taskId?: string;
+  message?: string;
+  reason?: KnowledgeChangeReason;
+  idempotencyKey?: string;
   expectedProjectRevision?: number;
   changes: KnowledgeChange[];
 }
@@ -130,14 +142,56 @@ export interface WriteProjectKnowledgeInput {
 export interface KnowledgeWriteResult {
   projectKey: string;
   dbRevision: number;
+  revisionBefore: number;
+  revisionAfter: number;
+  changeSetId: string;
+  message: string;
+  replayed?: boolean;
+  summary: {
+    created: number;
+    updated: number;
+    unchanged: number;
+    conflicts: number;
+  };
   changes: Array<{
     itemId: string;
     version: number;
     canonicalHash: string;
+    previousHash?: string;
+    outcome: 'created' | 'updated' | 'no_change';
+    changedFields: string[];
     lexicalState: 'current';
-    embeddingState: 'pending';
-    projectionState: 'pending';
+    embeddingState: 'pending' | 'unchanged';
+    projectionState: 'deferred' | 'unchanged';
   }>;
+}
+
+export type KnowledgeRecallIntent = 'orient' | 'find' | 'verify' | 'catch_up';
+export interface RecallProjectKnowledgeInput {
+  projectKey: string;
+  intent: KnowledgeRecallIntent;
+  query?: string;
+  worktreePath?: string;
+  worktreeId?: string;
+  taskId?: string;
+  filters?: SearchProjectContextInput['filters'];
+  knownStateHash?: string;
+  knownItemHashes?: Record<string, string>;
+  maxTokens: number;
+}
+
+export interface KnowledgeRecallResult extends ContextResults {
+  status: 'modified' | 'not_modified';
+  stateHash: string;
+  snapshotId?: string;
+  unchangedResults: number;
+  budget: {
+    limit: number;
+    used: number;
+    truncated: boolean;
+    omitted: number;
+    continuation?: string;
+  };
 }
 
 export interface SyncStatusInput {
@@ -188,6 +242,7 @@ export interface SyncStatusSummary {
   staleSources: number;
   staleEvidence: number;
   staleProjections: number;
+  deferredProjections?: number;
   pendingJobs: number;
   failedJobs: number;
 }
@@ -235,7 +290,8 @@ export interface ProjectSyncStatus {
   domainSync?: DomainSyncStatus;
 }
 
-export type ProjectSyncRunnableAction = 'REINDEX_SOURCE' | 'FINALIZE_PROJECTION';
+export type ProjectSyncRunnableAction =
+  'REINDEX_SOURCE' | 'FINALIZE_PROJECTION';
 
 export interface ProjectSyncActionInput {
   projectKey: string;
@@ -257,9 +313,54 @@ export interface FinalizeProjectionInput {
   localEmbeddingFallback: boolean;
 }
 
+export interface PreviewProjectViewsInput {
+  projectKey: string;
+  worktreePath: string;
+  vaultPath?: string;
+  views?: Array<'project-now' | 'worktree-now'>;
+  worktreeIds?: string[];
+  knownPreviewHash?: string;
+}
+
+export interface MaterializeProjectViewsInput extends PreviewProjectViewsInput {
+  previewHash: string;
+}
+
+export interface ProjectViewsPreview {
+  projectKey: string;
+  dbRevision: number;
+  status: 'modified' | 'not_modified';
+  previewHash: string;
+  estimatedWrites: number;
+  views: Array<{
+    viewId: string;
+    relativePath: string;
+    state: 'changed' | 'unchanged' | 'conflicted';
+    reason: string;
+    desiredHash: string;
+    worktreeId?: string;
+  }>;
+}
+
+export interface MaterializeProjectViewsResult {
+  projectKey: string;
+  dbRevision: number;
+  previewHash: string;
+  published: number;
+  unchanged: number;
+  conflicted: number;
+  paths: string[];
+}
+
 export interface ProjectSyncActionRunner {
   finalizeProjection(input: FinalizeProjectionInput): Promise<object>;
   runProjectSyncAction(input: ProjectSyncActionInput): Promise<object>;
+  previewProjectViews(
+    input: PreviewProjectViewsInput,
+  ): Promise<ProjectViewsPreview>;
+  materializeProjectViews(
+    input: MaterializeProjectViewsInput,
+  ): Promise<MaterializeProjectViewsResult>;
 }
 
 export interface KnowledgeStore {
@@ -270,6 +371,9 @@ export interface KnowledgeStore {
   expandProjectContext(
     input: ExpandProjectContextInput,
   ): Promise<ContextResults>;
+  recallProjectKnowledge(
+    input: RecallProjectKnowledgeInput,
+  ): Promise<KnowledgeRecallResult>;
   writeProjectKnowledge(
     input: WriteProjectKnowledgeInput,
   ): Promise<KnowledgeWriteResult>;

@@ -446,7 +446,7 @@ Use temporary test-vault configuration when inspecting write tools. Confirm the 
 
 ## Low-token project knowledge profile
 
-Set `OBSIDIAN_MCP_PROFILE=standard` and `PROJECT_KNOWLEDGE_DATABASE_URL` to expose exactly five routine tools: snapshot, search, expansion, batch write, and sync status. Set `OBSIDIAN_MCP_PROFILE=admin` for legacy vault/file administration.
+Set `OBSIDIAN_MCP_PROFILE=standard` and `PROJECT_KNOWLEDGE_DATABASE_URL` to expose the bounded project-knowledge tools. Routine flows use compact status, hash-aware recall, selective expansion, idempotent writes, and explicit lazy-view preview/materialization. Compatibility snapshot, search, finalize, and sync-action tools remain available. Set `OBSIDIAN_MCP_PROFILE=admin` for legacy vault/file administration.
 
 ```powershell
 $env:PROJECT_KNOWLEDGE_DATABASE_URL='postgresql://knowledge_connector:PASSWORD@127.0.0.1:5432/playnode'
@@ -457,7 +457,7 @@ $env:PROJECT_KNOWLEDGE_WORKER_ONCE='true'
 npm run knowledge:worker
 ```
 
-The worker fingerprints branch, HEAD, porcelain status, and dirty state. It reuses an active immutable snapshot when these match, or indexes only changed/renamed/deleted files. Canonical knowledge writes synchronously update version history and BM25 content, then queue embedding and Markdown projection work. Embedding failure leaves exact and BM25 retrieval available.
+The worker fingerprints branch, HEAD, porcelain status, and dirty state. It reuses an active immutable snapshot when these match, or indexes only changed/renamed/deleted files. Canonical knowledge writes synchronously update version history and BM25 content, then queue embedding work. In lazy mode, affected views become `deferred`; Markdown is written only after `preview_project_views` and `materialize_project_views`. Embedding failure leaves exact and BM25 retrieval available.
 
 `get_project_sync_status` defaults to a compact, changed-only audit. It returns bounded summary counts, the highest-priority issues, dependency-ordered repair actions, cost estimates, and a fingerprint-backed cache key. A clean result ends the sync without retrieval; use `compact: false` only for deep troubleshooting. The worker uses the same status-first plan, blocks automatic repair when failed jobs exist unless `PROJECT_KNOWLEDGE_ALLOW_FAILED_REPAIR=true`, and leaves projection publishing in the worker lifecycle.
 
@@ -486,5 +486,11 @@ The installer stores its token in the protected Codex project-knowledge environm
 Source-verified writes for API contracts, database documentation, architecture boundaries, permissions, and runbooks must include snapshot-bound evidence refs. A stale required record returns `DOCS_STALE` and prevents verified completion until an evidence-backed update makes it current. General and historical notes remain warnings.
 
 Generated pages live under `Published/` during dual-run validation. Human edits belong in `Inbox/`; a generated-page edit is preserved in `Inbox/Conflicts` and reported as projection drift. Managed hashes use canonical JSON SHA-256 for records and normalized UTF-8/LF Markdown SHA-256 excluding volatile managed frontmatter.
+
+New project bootstraps include `.obsidian-local/views.yaml`. Its default lazy
+registry publishes `Published/00 - Now.md` and one scoped
+`Published/Worktrees/{branchSlug}--{worktreeId8}/Now.md` per live Git
+worktree. Removed worktree notes move to `Archive/Worktrees/` only when their
+managed content is intact; edited notes enter the conflict workflow.
 
 The PostgreSQL role should have `USAGE` on `project_knowledge` and DML only for that schema, with no application-schema DML. Keep the pool small and use the configured statement timeout. Run the schema migration with a local database owner before switching the connector to the restricted role.

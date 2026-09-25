@@ -564,4 +564,44 @@ CREATE TABLE IF NOT EXISTS project_knowledge.worker_scheduler_state (
 );
 `,
   },
+  {
+    id: '0008_low_token_change_history_and_lazy_views',
+    sql: String.raw`
+CREATE TABLE IF NOT EXISTS project_knowledge.knowledge_change_sets (
+  id uuid PRIMARY KEY,
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id) ON DELETE CASCADE,
+  base_revision bigint NOT NULL,
+  new_revision bigint NOT NULL,
+  actor text NOT NULL,
+  task_id text,
+  idempotency_key text NOT NULL,
+  reason text NOT NULL CHECK (reason IN ('progress','status_change','decision','correction','evidence_refresh','risk','supersede')),
+  message text NOT NULL CHECK (char_length(message) BETWEEN 1 AND 160),
+  receipt jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(project_id,idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS project_knowledge.knowledge_change_entries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  change_set_id uuid NOT NULL REFERENCES project_knowledge.knowledge_change_sets(id) ON DELETE CASCADE,
+  item_id uuid NOT NULL REFERENCES project_knowledge.knowledge_items(id),
+  operation text NOT NULL,
+  outcome text NOT NULL CHECK (outcome IN ('created','updated','no_change')),
+  previous_version integer,
+  new_version integer NOT NULL,
+  previous_hash text,
+  new_hash text NOT NULL,
+  changed_fields text[] NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS knowledge_change_entries_item
+  ON project_knowledge.knowledge_change_entries(item_id,change_set_id);
+
+ALTER TABLE project_knowledge.note_projections
+  DROP CONSTRAINT IF EXISTS note_projections_state_check;
+ALTER TABLE project_knowledge.note_projections
+  ADD CONSTRAINT note_projections_state_check
+  CHECK (state IN ('current','pending','deferred','drifted','missing','failed'));
+`,
+  },
 ];

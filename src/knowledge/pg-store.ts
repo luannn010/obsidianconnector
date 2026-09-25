@@ -15,9 +15,11 @@ import type {
   ExpandProjectContextInput,
   KnowledgeChange,
   KnowledgeStore,
+  KnowledgeRecallResult,
   KnowledgeWriteResult,
   ProjectSnapshot,
   ProjectSnapshotInput,
+  RecallProjectKnowledgeInput,
   ProjectSyncStatus,
   SyncStatusSummary,
   SyncSuggestedAction,
@@ -122,7 +124,8 @@ export interface PgKnowledgeStoreOptions {
 function asKnowledgeError(error: unknown): KnowledgeError {
   if (error instanceof KnowledgeError) return error;
   const databaseError = error as { code?: unknown; message?: unknown };
-  const message = typeof databaseError.message === 'string' ? databaseError.message : '';
+  const message =
+    typeof databaseError.message === 'string' ? databaseError.message : '';
   if (
     (error as { name?: unknown })?.name === 'TypeError' &&
     message.includes('deliveryStatus')
@@ -747,30 +750,129 @@ export class PgKnowledgeStore implements KnowledgeStore {
     }
   }
 
+  async recallProjectKnowledge(
+    input: RecallProjectKnowledgeInput,
+  ): Promise<KnowledgeRecallResult> {
+    const defaults: Record<RecallProjectKnowledgeInput['intent'], string> = {
+      orient: 'architecture active work blockers constraints',
+      find: '',
+      verify: 'verification evidence',
+      catch_up: 'recent progress decisions blockers completed',
+    };
+    const query = input.query?.trim() || defaults[input.intent];
+    if (!query)
+      throw new KnowledgeError(
+        'VERSION_CONFLICT',
+        'A recall query is required for find intent',
+        false,
+      );
+    let snapshotId: string | undefined;
+    let worktreeId = input.worktreeId;
+    if (input.worktreePath) {
+      const snapshot = await this.getProjectSnapshot({
+        projectKey: input.projectKey,
+        worktreePath: input.worktreePath,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        maxTokens: 100,
+      });
+      snapshotId = snapshot.snapshotId;
+      worktreeId = snapshot.worktreeId;
+    }
+    const recalled = await this.searchProjectContext({
+      projectKey: input.projectKey,
+      query,
+      mode: input.intent === 'verify' ? 'exact' : 'auto',
+      limit: 12,
+      maxTokens: Math.min(4000, input.maxTokens * 3),
+      ...(snapshotId ? { snapshotId } : {}),
+      ...(worktreeId ? { worktreeId } : {}),
+      ...(input.filters ? { filters: input.filters } : {}),
+    });
+    const stateHash = canonicalHash({
+      projectKey: input.projectKey,
+      intent: input.intent,
+      query,
+      snapshotId: snapshotId ?? null,
+      gitRevision: recalled.gitRevision,
+      dbRevision: recalled.dbRevision,
+      warnings: recalled.warnings ?? [],
+      results: recalled.results.map((hit) => ({
+        ref: hit.ref,
+        itemId: hit.itemId ?? null,
+        itemVersion: hit.itemVersion ?? null,
+        contentHash: hit.contentHash,
+      })),
+    });
+    if (input.knownStateHash === stateHash) {
+      const packed = packWithinTokenBudget([], input.maxTokens, {
+        status: 'not_modified' as const,
+        stateHash,
+        freshness: recalled.freshness,
+        gitRevision: recalled.gitRevision,
+        dbRevision: recalled.dbRevision,
+        unchangedResults: recalled.results.length,
+        ...(snapshotId ? { snapshotId } : {}),
+        ...(recalled.warnings ? { warnings: recalled.warnings } : {}),
+      });
+      return {
+        ...packed.metadata,
+        results: packed.results,
+        budget: packed.budget,
+      };
+    }
+    const known = input.knownItemHashes ?? {};
+    const results = recalled.results.filter(
+      (hit) => !hit.itemId || known[hit.itemId] !== hit.contentHash,
+    );
+    const packed = packWithinTokenBudget(results, input.maxTokens, {
+      status: 'modified' as const,
+      stateHash,
+      freshness: recalled.freshness,
+      gitRevision: recalled.gitRevision,
+      dbRevision: recalled.dbRevision,
+      unchangedResults: recalled.results.length - results.length,
+      ...(snapshotId ? { snapshotId } : {}),
+      ...(recalled.warnings ? { warnings: recalled.warnings } : {}),
+    });
+    return {
+      ...packed.metadata,
+      results: packed.results,
+      budget: packed.budget,
+    };
+  }
+
   async writeProjectKnowledge(
     input: WriteProjectKnowledgeInput,
   ): Promise<KnowledgeWriteResult> {
-    const normalizedChanges = input.changes
-      .map((change, index) => {
-        if (!change || typeof change !== 'object' || !('item' in change)) {
-          throw new KnowledgeError(
-            'VERSION_CONFLICT',
-            'Each knowledge change must include an item object',
-            false,
-            { index },
-          );
-        }
-        const candidate = change as KnowledgeChange;
-        if (!candidate.item || typeof candidate.item !== 'object') {
-          throw new KnowledgeError(
-            'VERSION_CONFLICT',
-            'Each knowledge change must include a valid item',
-            false,
-            { index },
-          );
-        }
-        return candidate;
-      });
+    const message = (
+      input.message ?? `Knowledge update by ${input.actor}`
+    ).trim();
+    if (!message || message.length > 160)
+      throw new KnowledgeError(
+        'VERSION_CONFLICT',
+        'Knowledge update message must contain 1 to 160 characters',
+        false,
+      );
+    const normalizedChanges = input.changes.map((change, index) => {
+      if (!change || typeof change !== 'object' || !('item' in change)) {
+        throw new KnowledgeError(
+          'VERSION_CONFLICT',
+          'Each knowledge change must include an item object',
+          false,
+          { index },
+        );
+      }
+      const candidate = change as KnowledgeChange;
+      if (!candidate.item || typeof candidate.item !== 'object') {
+        throw new KnowledgeError(
+          'VERSION_CONFLICT',
+          'Each knowledge change must include a valid item',
+          false,
+          { index },
+        );
+      }
+      return candidate;
+    });
     const client = await this.pool.connect().catch((error: unknown) => {
       throw asKnowledgeError(error);
     });
@@ -803,7 +905,19 @@ export class PgKnowledgeStore implements KnowledgeStore {
           },
         );
       }
-      const nextRevision = Number(projectRow.db_revision) + 1;
+      const revisionBefore = Number(projectRow.db_revision);
+      if (input.idempotencyKey) {
+        const replay = await client.query<{ receipt: KnowledgeWriteResult }>(
+          `SELECT receipt FROM project_knowledge.knowledge_change_sets
+           WHERE project_id=$1 AND idempotency_key=$2`,
+          [projectRow.project_id, input.idempotencyKey],
+        );
+        if (replay.rows[0]?.receipt) {
+          await client.query('COMMIT');
+          return { ...replay.rows[0].receipt, replayed: true };
+        }
+      }
+      const nextRevision = revisionBefore + 1;
       const requestsVerifiedCompletion = normalizedChanges.some(
         (change) =>
           change.item?.deliveryStatus === 'completed' &&
@@ -840,22 +954,95 @@ export class PgKnowledgeStore implements KnowledgeStore {
           );
         }
       }
+      const changeSetId = randomUUID();
+      const idempotencyKey = input.idempotencyKey ?? `legacy:${changeSetId}`;
+      await client.query(
+        `INSERT INTO project_knowledge.knowledge_change_sets
+         (id,project_id,base_revision,new_revision,actor,task_id,idempotency_key,reason,message)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          changeSetId,
+          projectRow.project_id,
+          revisionBefore,
+          nextRevision,
+          input.actor,
+          input.taskId ?? null,
+          idempotencyKey,
+          input.reason ?? 'progress',
+          message,
+        ],
+      );
       const changes = [] as KnowledgeWriteResult['changes'];
       for (const change of normalizedChanges) {
         changes.push(
           await this.applyChange(client, projectRow.project_id, input, change),
         );
       }
-      await client.query(
-        'UPDATE project_knowledge.projects SET db_revision=$2, updated_at=now() WHERE project_id=$1',
-        [projectRow.project_id, nextRevision],
+      const changed = changes.filter(
+        (change) => change.outcome !== 'no_change',
       );
-      await client.query('COMMIT');
-      return {
+      const revisionAfter = changed.length ? nextRevision : revisionBefore;
+      for (const [index, result] of changes.entries()) {
+        const requested = normalizedChanges[index]!;
+        await client.query(
+          `INSERT INTO project_knowledge.knowledge_change_entries
+           (change_set_id,item_id,operation,outcome,previous_version,new_version,
+            previous_hash,new_hash,changed_fields)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            changeSetId,
+            result.itemId,
+            requested.operation,
+            result.outcome,
+            result.outcome === 'created'
+              ? null
+              : result.outcome === 'no_change'
+                ? result.version
+                : Math.max(1, result.version - 1),
+            result.version,
+            result.previousHash ?? null,
+            result.canonicalHash,
+            result.changedFields,
+          ],
+        );
+      }
+      if (changed.length) {
+        await client.query(
+          'UPDATE project_knowledge.projects SET db_revision=$2, updated_at=now() WHERE project_id=$1',
+          [projectRow.project_id, revisionAfter],
+        );
+        await client.query(
+          `UPDATE project_knowledge.note_projections SET state='deferred',updated_at=now()
+           WHERE project_id=$1 AND state='current'`,
+          [projectRow.project_id],
+        );
+      }
+      const summary = {
+        created: changes.filter((change) => change.outcome === 'created')
+          .length,
+        updated: changes.filter((change) => change.outcome === 'updated')
+          .length,
+        unchanged: changes.filter((change) => change.outcome === 'no_change')
+          .length,
+        conflicts: 0,
+      };
+      const receipt: KnowledgeWriteResult = {
         projectKey: input.projectKey,
-        dbRevision: nextRevision,
+        dbRevision: revisionAfter,
+        revisionBefore,
+        revisionAfter,
+        changeSetId,
+        message,
+        summary,
         changes,
       };
+      await client.query(
+        `UPDATE project_knowledge.knowledge_change_sets
+         SET new_revision=$3,receipt=$4 WHERE project_id=$1 AND id=$2`,
+        [projectRow.project_id, changeSetId, revisionAfter, receipt],
+      );
+      await client.query('COMMIT');
+      return receipt;
     } catch (error) {
       await client.query('ROLLBACK');
       throw asKnowledgeError(error);
@@ -870,7 +1057,11 @@ export class PgKnowledgeStore implements KnowledgeStore {
     input: WriteProjectKnowledgeInput,
     change: KnowledgeChange,
   ): Promise<KnowledgeWriteResult['changes'][number]> {
-    if (!change || typeof change !== 'object' || typeof change.item !== 'object') {
+    if (
+      !change ||
+      typeof change !== 'object' ||
+      typeof change.item !== 'object'
+    ) {
       throw new KnowledgeError(
         'VERSION_CONFLICT',
         'Knowledge change missing item payload',
@@ -916,13 +1107,29 @@ export class PgKnowledgeStore implements KnowledgeStore {
     }
     const itemId = existing?.id ?? change.item.id ?? randomUUID();
     const version = (existing?.current_version ?? 0) + 1;
-    if (!change.item.kind && !existing?.kind) {
+    const kind = change.item.kind ?? existing?.kind;
+    if (!kind) {
       throw new KnowledgeError(
         'VERSION_CONFLICT',
         'Knowledge item kind is required',
         false,
       );
     }
+    if (
+      existing &&
+      change.expectedHash !== undefined &&
+      existing.canonical_hash !== change.expectedHash
+    )
+      throw new KnowledgeError(
+        'VERSION_CONFLICT',
+        'Knowledge item hash changed',
+        false,
+        {
+          itemId: existing.id,
+          expected: change.expectedHash,
+          actual: existing.canonical_hash,
+        },
+      );
     const title = change.item.title ?? existing?.title;
     if (!title)
       throw new KnowledgeError(
@@ -942,7 +1149,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
       ...(change.item.properties ?? {}),
     };
     const record = {
-      kind: change.item.kind ?? existing?.kind,
+      kind,
       title,
       bodyMarkdown,
       properties,
@@ -967,6 +1174,40 @@ export class PgKnowledgeStore implements KnowledgeStore {
         { kind: record.kind, itemId },
       );
     const hash = canonicalHash(record);
+    const changedFields = existing
+      ? Object.entries(record)
+          .filter(([key, value]) => {
+            const existingKey =
+              key === 'bodyMarkdown'
+                ? 'body_markdown'
+                : key === 'deliveryStatus'
+                  ? 'delivery_status'
+                  : key === 'verificationStatus'
+                    ? 'verification_status'
+                    : key;
+            return (
+              canonicalHash(value) !== canonicalHash(existing[existingKey])
+            );
+          })
+          .map(([key]) => key)
+      : Object.keys(record);
+    if (
+      existing &&
+      hash === existing.canonical_hash &&
+      !change.evidence?.length &&
+      change.operation !== 'supersede'
+    )
+      return {
+        itemId: existing.id,
+        version: existing.current_version,
+        canonicalHash: hash,
+        previousHash: existing.canonical_hash,
+        outcome: 'no_change',
+        changedFields: [],
+        lexicalState: 'current',
+        embeddingState: 'unchanged',
+        projectionState: 'unchanged',
+      };
     if (!existing) {
       const stableKey =
         change.item.stableKey ??
@@ -1168,7 +1409,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
         chunkId,
         projectId,
         itemId,
-        change.item.kind,
+        record.kind,
         record.domain,
         record.service,
         title,
@@ -1181,16 +1422,9 @@ export class PgKnowledgeStore implements KnowledgeStore {
     await client.query(
       `INSERT INTO project_knowledge.outbox_jobs
         (project_id,job_type,job_key,required_capability,payload)
-      VALUES($1,'embed_chunk', $2,'embedding', $3),
-            ($1,'publish_item', $4,'publish', $5)
+      VALUES($1,'embed_chunk',$2,'embedding',$3)
       ON CONFLICT DO NOTHING`,
-      [
-        projectId,
-        `embed:${chunkId}`,
-        { chunkId },
-        `publish:${itemId}:${version}`,
-        { itemId, version },
-      ],
+      [projectId, `embed:${chunkId}`, { chunkId }],
     );
     if (change.operation === 'supersede' && change.supersedesId) {
       await client.query(
@@ -1202,9 +1436,12 @@ export class PgKnowledgeStore implements KnowledgeStore {
       itemId,
       version,
       canonicalHash: hash,
+      ...(existing ? { previousHash: existing.canonical_hash } : {}),
+      outcome: existing ? 'updated' : 'created',
+      changedFields,
       lexicalState: 'current',
       embeddingState: 'pending',
-      projectionState: 'pending',
+      projectionState: 'deferred',
     };
   }
 
@@ -1361,7 +1598,11 @@ export class PgKnowledgeStore implements KnowledgeStore {
         .filter((candidate) => candidate.state !== 'current')
         .reduce((total, current) => total + Number(current.count), 0);
       const staleProjections = projections.rows.filter(
-        (candidate) => candidate.state !== 'current',
+        (candidate) =>
+          candidate.state !== 'current' && candidate.state !== 'deferred',
+      ).length;
+      const deferredProjections = projections.rows.filter(
+        (candidate) => candidate.state === 'deferred',
       ).length;
       const dirtyWorktrees = snapshots.rows.filter(
         (candidate) =>
@@ -1372,6 +1613,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
         staleSources,
         staleEvidence,
         staleProjections,
+        deferredProjections,
         pendingJobs: queueCounts.get('pending') ?? 0,
         failedJobs: queueCounts.get('failed') ?? 0,
       };

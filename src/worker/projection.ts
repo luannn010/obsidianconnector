@@ -163,3 +163,74 @@ export async function removeProjection(
   await unlink(target);
   return { removed: true, ...(preservedPath ? { preservedPath } : {}) };
 }
+
+export async function archiveProjection(
+  vaultRoot: string,
+  relativePath: string,
+  archiveRelativePath: string,
+  lastPublishedHash?: string,
+): Promise<{
+  archived: boolean;
+  conflicted: boolean;
+  archivePath?: string;
+  preservedPath?: string;
+  observedHash?: string;
+}> {
+  const source = safeTarget(vaultRoot, relativePath);
+  const current = await readFile(source, 'utf8').catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    },
+  );
+  if (current === undefined) return { archived: false, conflicted: false };
+
+  const observedHash = projectionHash(current);
+  if (
+    !lastPublishedHash ||
+    observedHash !== lastPublishedHash ||
+    !isIntactManagedProjection(current, observedHash)
+  ) {
+    const conflict = safeTarget(
+      vaultRoot,
+      path.join(
+        'Inbox',
+        'Conflicts',
+        `${Date.now()}-archive-${path.basename(relativePath)}`,
+      ),
+    );
+    await mkdir(path.dirname(conflict), { recursive: true });
+    await writeFile(conflict, current, 'utf8');
+    return {
+      archived: false,
+      conflicted: true,
+      preservedPath: conflict,
+      observedHash,
+    };
+  }
+
+  let archivePath = archiveRelativePath;
+  let target = safeTarget(vaultRoot, archivePath);
+  const occupied = await readFile(target, 'utf8').catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    },
+  );
+  if (occupied !== undefined) {
+    const parsed = path.parse(archiveRelativePath);
+    archivePath = path.join(
+      parsed.dir,
+      `${parsed.name}-${Date.now()}${parsed.ext}`,
+    );
+    target = safeTarget(vaultRoot, archivePath);
+  }
+  await mkdir(path.dirname(target), { recursive: true });
+  await rename(source, target);
+  return {
+    archived: true,
+    conflicted: false,
+    archivePath,
+    observedHash,
+  };
+}

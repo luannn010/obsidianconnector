@@ -1,12 +1,13 @@
 import path from 'node:path';
 import type { Pool } from 'pg';
-import type {
-  EmbeddingProvider,
-  PgPoolLike,
-} from '../knowledge/pg-store.js';
+import type { EmbeddingProvider, PgPoolLike } from '../knowledge/pg-store.js';
 import { PgKnowledgeStore } from '../knowledge/pg-store.js';
 import type {
   FinalizeProjectionInput,
+  MaterializeProjectViewsInput,
+  MaterializeProjectViewsResult,
+  PreviewProjectViewsInput,
+  ProjectViewsPreview,
   ProjectSyncActionInput,
   ProjectSyncActionRunner,
   ProjectSyncStatus,
@@ -24,6 +25,7 @@ import {
 } from '../worker/knowledge-worker.js';
 import { acquireSingletonLock } from '../worker/singleton-lock.js';
 import { synchronizeProjectWorktrees } from '../worker/worktree-lifecycle.js';
+import { LazyProjectViewsService } from './lazy-project-views-service.js';
 
 interface ProjectSyncActionsOptions {
   projectName?: string;
@@ -170,12 +172,40 @@ function matchingActions(
 
 export class ProjectSyncActionsService implements ProjectSyncActionRunner {
   private readonly store: PgKnowledgeStore;
+  private readonly views: LazyProjectViewsService;
 
   constructor(
     private readonly pool: Pool,
     private readonly options: ProjectSyncActionsOptions,
   ) {
     this.store = new PgKnowledgeStore(pool as unknown as PgPoolLike);
+    this.views = new LazyProjectViewsService(pool as unknown as PgPoolLike);
+  }
+
+  async previewProjectViews(
+    input: PreviewProjectViewsInput,
+  ): Promise<ProjectViewsPreview> {
+    return this.withWorkerLock(async () => {
+      const project = this.project(input);
+      await this.worker(false).syncWorktrees(project);
+      return this.views.preview({
+        ...input,
+        vaultPath: project.vaultPath,
+      });
+    });
+  }
+
+  async materializeProjectViews(
+    input: MaterializeProjectViewsInput,
+  ): Promise<MaterializeProjectViewsResult> {
+    return this.withWorkerLock(async () => {
+      const project = this.project(input);
+      await this.worker(false).syncWorktrees(project);
+      return this.views.materialize({
+        ...input,
+        vaultPath: project.vaultPath,
+      });
+    });
   }
 
   async finalizeProjection(
@@ -189,7 +219,10 @@ export class ProjectSyncActionsService implements ProjectSyncActionRunner {
           getStatus: () => this.status(input.projectKey),
           processEmbeddings: () =>
             input.localEmbeddingFallback && this.options.embedder
-              ? drainQueueBatches((limit) => worker.processEmbeddings(limit), 50)
+              ? drainQueueBatches(
+                  (limit) => worker.processEmbeddings(limit),
+                  50,
+                )
               : Promise.resolve(0),
           publishVault: () => worker.publishVault(project),
           sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),

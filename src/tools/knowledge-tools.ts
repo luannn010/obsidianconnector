@@ -13,7 +13,7 @@ const filters = z.record(z.array(z.string())).optional();
 const knowledgeChangeItemSchema = z.object({
   id: z.string().optional(),
   stableKey: z.string().optional(),
-  kind: z.string(),
+  kind: z.string().optional(),
   title: z.string().optional(),
   bodyMarkdown: z.string().optional(),
   deliveryStatus: z.string().optional(),
@@ -34,6 +34,7 @@ const knowledgeEvidenceSchema = z.object({
 const knowledgeChangeObjectSchema = z.object({
   operation: z.enum(['create', 'patch', 'append', 'supersede']),
   expectedVersion: z.number().int().min(0).optional(),
+  expectedHash: z.string().length(64).optional(),
   supersedesId: z.string().optional(),
   evidence: z.array(knowledgeEvidenceSchema).optional(),
   item: knowledgeChangeItemSchema,
@@ -70,6 +71,34 @@ export function registerKnowledgeTools(
       runTool(
         () => knowledge.getProjectSnapshot(input),
         (data) => `Snapshot ${data.snapshotId} at ${data.gitRevision}`,
+      ),
+  );
+
+  server.registerTool(
+    'recall_project_knowledge',
+    {
+      description:
+        'Recall compact project knowledge in one call. Pass knownStateHash to receive a not_modified receipt when results are unchanged.',
+      inputSchema: {
+        projectKey,
+        intent: z.enum(['orient', 'find', 'verify', 'catch_up']),
+        query: z.string().optional(),
+        worktreePath: z.string().optional(),
+        worktreeId: z.string().uuid().optional(),
+        taskId: z.string().optional(),
+        filters,
+        knownStateHash: z.string().length(64).optional(),
+        knownItemHashes: z.record(z.string()).optional(),
+        maxTokens: maxTokens(600, 2000),
+      },
+    },
+    async (input) =>
+      runTool(
+        () => knowledge.recallProjectKnowledge(input),
+        (data) =>
+          data.status === 'not_modified'
+            ? `Knowledge unchanged; state ${data.stateHash.slice(0, 8)}`
+            : `${data.results.length} changed knowledge result(s); state ${data.stateHash.slice(0, 8)}`,
       ),
   );
 
@@ -129,6 +158,19 @@ export function registerKnowledgeTools(
         projectKey,
         actor: z.string(),
         taskId: z.string().optional(),
+        message: z.string().trim().min(1).max(160).optional(),
+        reason: z
+          .enum([
+            'progress',
+            'status_change',
+            'decision',
+            'correction',
+            'evidence_refresh',
+            'risk',
+            'supersede',
+          ])
+          .optional(),
+        idempotencyKey: z.string().trim().min(1).max(200).optional(),
         expectedProjectRevision: z.number().int().min(0).optional(),
         changes: z.array(knowledgeChangeSchema).min(1).max(20),
       },
@@ -136,8 +178,13 @@ export function registerKnowledgeTools(
     async (input) =>
       runTool(
         () => knowledge.writeProjectKnowledge(input),
-        (data) =>
-          `${data.changes.length} knowledge change(s) committed at revision ${data.dbRevision}`,
+        (data) => {
+          const hashes = data.changes
+            .slice(0, 3)
+            .map((change) => change.canonicalHash.slice(0, 8))
+            .join(',');
+          return `Revision ${data.revisionBefore} → ${data.revisionAfter}: ${data.summary.created} created, ${data.summary.updated} updated, ${data.summary.unchanged} unchanged; hashes ${hashes || 'none'}; ${data.message}`;
+        },
       ),
   );
 
@@ -162,6 +209,55 @@ export function registerKnowledgeTools(
   );
 
   if (!syncActions) return;
+
+  const namedViewInputs = {
+    projectKey,
+    worktreePath: z.string(),
+    vaultPath: z.string().optional(),
+    views: z
+      .array(z.enum(['project-now', 'worktree-now']))
+      .max(2)
+      .optional(),
+    worktreeIds: z.array(z.string().uuid()).max(50).optional(),
+  };
+
+  server.registerTool(
+    'preview_project_views',
+    {
+      description:
+        'Preview which lazy project and worktree notes would change without writing Markdown or returning rendered note bodies.',
+      inputSchema: {
+        ...namedViewInputs,
+        knownPreviewHash: z.string().length(64).optional(),
+      },
+    },
+    async (input) =>
+      runTool(
+        () => syncActions.previewProjectViews(input),
+        (data) =>
+          data.status === 'not_modified'
+            ? `Named views unchanged; preview ${data.previewHash.slice(0, 8)}`
+            : `${data.estimatedWrites} named view(s) would change; preview ${data.previewHash.slice(0, 8)}`,
+      ),
+  );
+
+  server.registerTool(
+    'materialize_project_views',
+    {
+      description:
+        'Publish only changed lazy named views after validating an exact preview hash.',
+      inputSchema: {
+        ...namedViewInputs,
+        previewHash: z.string().length(64),
+      },
+    },
+    async (input) =>
+      runTool(
+        () => syncActions.materializeProjectViews(input),
+        (data) =>
+          `${data.published} published, ${data.unchanged} unchanged, ${data.conflicted} conflicted at revision ${data.dbRevision}`,
+      ),
+  );
 
   server.registerTool(
     'finalize_projection',

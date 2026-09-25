@@ -1,5 +1,9 @@
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  isLazyProjectionMode,
+  readProjectViewsConfig,
+} from '../services/project-views-config-service.js';
 import type { Pool } from 'pg';
 import { countSerializedTokens } from '../knowledge/token-budget.js';
 import {
@@ -519,21 +523,23 @@ export class KnowledgeWorker {
     removed: number;
     paths: string[];
   }> {
+    const registered = await listRegisteredWorktrees(project.repositoryPath);
+    const registeredPaths = new Set(
+      registered.map((item) => path.resolve(item.path).toLowerCase()),
+    );
     const projectRow = (
       await this.pool.query<{ project_id: string; repository_id: string }>(
         `SELECT p.project_id,r.id AS repository_id FROM project_knowledge.projects p
-      JOIN project_knowledge.repositories r ON r.project_id=p.project_id WHERE p.project_key=$1 AND r.root_path=$2`,
-        [project.projectKey, path.resolve(project.repositoryPath)],
+      JOIN project_knowledge.repositories r ON r.project_id=p.project_id
+      WHERE p.project_key=$1 AND lower(r.root_path)=ANY($2::text[])
+      ORDER BY r.root_path LIMIT 1`,
+        [project.projectKey, [...registeredPaths]],
       )
     ).rows[0];
     if (!projectRow)
       throw new Error(
         'Project must be reconciled before worktrees are synchronized',
       );
-    const registered = await listRegisteredWorktrees(project.repositoryPath);
-    const registeredPaths = new Set(
-      registered.map((item) => path.resolve(item.path).toLowerCase()),
-    );
     for (const item of registered) {
       const fingerprint = await fingerprintWorktree(item.path);
       await this.pool.query(
@@ -1232,6 +1238,13 @@ export class KnowledgeWorker {
     ).rows[0];
     if (!projectRow)
       throw new Error('Project must be reconciled before publishing');
+    if (
+      isLazyProjectionMode(
+        await readProjectViewsConfig(path.resolve(project.repositoryPath)),
+      )
+    ) {
+      return { current: 0, drifted: 0 };
+    }
     const activeSnapshot = (
       await this.pool.query<{
         id: string;

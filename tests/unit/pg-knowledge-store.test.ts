@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { KnowledgeError } from '../../src/knowledge/errors.js';
+import { canonicalHash } from '../../src/knowledge/hash.js';
 import {
   PgKnowledgeStore,
   type PgClientLike,
@@ -484,7 +485,7 @@ describe('PostgreSQL knowledge store', () => {
           return { rows: [] };
         if (sql.includes('FROM project_knowledge.note_projections'))
           return {
-            rows: [{ state: 'current' }] as unknown as Row[],
+            rows: [{ state: 'deferred' }] as unknown as Row[],
           };
         if (sql.includes('FROM project_knowledge.projection_conflicts'))
           return { rows: [] };
@@ -519,11 +520,54 @@ describe('PostgreSQL knowledge store', () => {
       staleSources: 0,
       staleEvidence: 0,
       staleProjections: 0,
+      deferredProjections: 1,
       pendingJobs: 0,
       failedJobs: 0,
     });
     expect(result.topIssues).toEqual([]);
     expect(result.topSuggestedActions).toEqual([]);
+  });
+
+  it('returns a stable hash-aware recall and suppresses unchanged results', async () => {
+    const store = new PgKnowledgeStore(searchPool(2));
+    const first = await store.recallProjectKnowledge({
+      projectKey: 'MC-Platform',
+      intent: 'find',
+      query: 'authentication architecture',
+      maxTokens: 600,
+    });
+
+    expect(first.status).toBe('modified');
+    expect(first.results).toHaveLength(2);
+    expect(first.stateHash).toMatch(/^[a-f0-9]{64}$/u);
+
+    const second = await store.recallProjectKnowledge({
+      projectKey: 'MC-Platform',
+      intent: 'find',
+      query: 'authentication architecture',
+      knownStateHash: first.stateHash,
+      maxTokens: 600,
+    });
+    expect(second).toMatchObject({
+      status: 'not_modified',
+      stateHash: first.stateHash,
+      results: [],
+    });
+  });
+
+  it('omits records whose item hash is already known by the caller', async () => {
+    const store = new PgKnowledgeStore(searchPool(2));
+    const result = await store.recallProjectKnowledge({
+      projectKey: 'MC-Platform',
+      intent: 'orient',
+      knownItemHashes: {
+        '10000000-0000-4000-8000-000000000001': 'hash-1',
+      },
+      maxTokens: 600,
+    });
+
+    expect(result.results.map((hit) => hit.contentHash)).toEqual(['hash-2']);
+    expect(result.unchangedResults).toBe(1);
   });
 
   it('aggregates UUID evidence and mapping versions using PostgreSQL-supported expressions', async () => {
@@ -1459,5 +1503,146 @@ describe('PostgreSQL knowledge store', () => {
         ],
       }),
     ).rejects.toMatchObject({ code: 'DOCS_STALE', retryable: false });
+  });
+
+  it('rejects a patch when the expected canonical hash changed', async () => {
+    class HashClient extends FakeClient {
+      override async query<
+        Row extends Record<string, unknown> = Record<string, unknown>,
+      >(sql: string): Promise<PgQueryResult<Row>> {
+        this.statements.push(sql);
+        if (sql.includes('FROM project_knowledge.projects'))
+          return {
+            rows: [
+              { project_id: 'project-1', db_revision: 3 },
+            ] as unknown as Row[],
+          };
+        if (sql.includes('FOR UPDATE OF i'))
+          return {
+            rows: [
+              {
+                id: 'item-1',
+                stable_key: 'decision:sql',
+                kind: 'decision',
+                title: 'Use SQL',
+                current_version: 2,
+                delivery_status: 'active',
+                verification_status: 'unverified',
+                domain: null,
+                service: null,
+                body_markdown: 'PostgreSQL is canonical.',
+                properties: {},
+                canonical_hash: 'current-hash',
+              },
+            ] as unknown as Row[],
+          };
+        return { rows: [] };
+      }
+    }
+    const client = new HashClient();
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql) => client.query(sql),
+    });
+
+    await expect(
+      store.writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        message: 'Clarify the SQL decision',
+        reason: 'correction',
+        idempotencyKey: 'write-1',
+        changes: [
+          {
+            operation: 'patch',
+            expectedHash: 'stale-hash',
+            item: { id: 'item-1', kind: 'decision', bodyMarkdown: 'Updated' },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'VERSION_CONFLICT' });
+    expect(client.statements.at(-1)).toBe('ROLLBACK');
+  });
+
+  it('returns no_change without bumping the project revision or queuing jobs', async () => {
+    const currentRecord = {
+      kind: 'decision',
+      title: 'Use SQL',
+      bodyMarkdown: 'PostgreSQL is canonical.',
+      properties: {},
+      deliveryStatus: 'active',
+      verificationStatus: 'unverified',
+      domain: null,
+      service: null,
+    };
+    const currentHash = canonicalHash(currentRecord);
+    class NoChangeClient extends FakeClient {
+      override async query<
+        Row extends Record<string, unknown> = Record<string, unknown>,
+      >(sql: string): Promise<PgQueryResult<Row>> {
+        this.statements.push(sql);
+        if (sql.includes('FROM project_knowledge.projects'))
+          return {
+            rows: [
+              { project_id: 'project-1', db_revision: 3 },
+            ] as unknown as Row[],
+          };
+        if (sql.includes('FOR UPDATE OF i'))
+          return {
+            rows: [
+              {
+                id: 'item-1',
+                stable_key: 'decision:sql',
+                kind: 'decision',
+                title: 'Use SQL',
+                current_version: 2,
+                delivery_status: 'active',
+                verification_status: 'unverified',
+                domain: null,
+                service: null,
+                body_markdown: 'PostgreSQL is canonical.',
+                properties: {},
+                canonical_hash: currentHash,
+              },
+            ] as unknown as Row[],
+          };
+        if (sql.includes('INSERT INTO project_knowledge.knowledge_change_sets'))
+          return { rows: [{ id: 'change-set-1' }] as unknown as Row[] };
+        return { rows: [] };
+      }
+    }
+    const client = new NoChangeClient();
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql) => client.query(sql),
+    });
+
+    const result = await store.writeProjectKnowledge({
+      projectKey: 'MC-Platform',
+      actor: 'codex',
+      message: 'Confirm SQL decision',
+      reason: 'progress',
+      idempotencyKey: 'write-2',
+      changes: [
+        {
+          operation: 'patch',
+          expectedHash: currentHash,
+          item: { id: 'item-1' },
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      revisionBefore: 3,
+      revisionAfter: 3,
+      summary: { unchanged: 1, updated: 0 },
+      changes: [{ itemId: 'item-1', outcome: 'no_change' }],
+    });
+    expect(
+      client.statements.some((sql) => sql.includes('SET db_revision')),
+    ).toBe(false);
+    expect(client.statements.some((sql) => sql.includes('outbox_jobs'))).toBe(
+      false,
+    );
   });
 });

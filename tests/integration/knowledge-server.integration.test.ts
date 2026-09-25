@@ -57,16 +57,38 @@ function fakeStore(): KnowledgeStore {
       dbRevision: 7,
       results: [],
     }),
+    recallProjectKnowledge: async () => ({
+      status: 'not_modified',
+      stateHash: 'a'.repeat(64),
+      freshness: 'current',
+      gitRevision: 'abc123',
+      dbRevision: 7,
+      results: [],
+      unchangedResults: 1,
+      budget: { limit: 600, used: 50, truncated: false, omitted: 0 },
+    }),
     writeProjectKnowledge: async (input) => ({
       projectKey: input.projectKey,
       dbRevision: 8,
+      revisionBefore: 7,
+      revisionAfter: 8,
+      changeSetId: 'change-set-1',
+      message: input.message ?? 'Knowledge update by codex',
+      summary: {
+        created: input.changes.length,
+        updated: 0,
+        unchanged: 0,
+        conflicts: 0,
+      },
       changes: input.changes.map((change, index) => ({
         itemId: change.item.id ?? `item-${index + 1}`,
         version: 1,
         canonicalHash: 'hash',
+        outcome: 'created',
+        changedFields: ['title'],
         lexicalState: 'current',
         embeddingState: 'pending',
-        projectionState: 'pending',
+        projectionState: 'deferred',
       })),
     }),
     getProjectSyncStatus: async () => ({
@@ -85,6 +107,23 @@ function fakeStore(): KnowledgeStore {
 
 function fakeSyncActions(): ProjectSyncActionRunner {
   return {
+    previewProjectViews: async (input) => ({
+      projectKey: input.projectKey,
+      dbRevision: 9,
+      status: 'modified',
+      previewHash: 'b'.repeat(64),
+      estimatedWrites: 2,
+      views: [],
+    }),
+    materializeProjectViews: async (input) => ({
+      projectKey: input.projectKey,
+      dbRevision: 9,
+      previewHash: input.previewHash,
+      published: 2,
+      unchanged: 0,
+      conflicted: 0,
+      paths: ['Published/00 - Now.md'],
+    }),
     finalizeProjection: async (input) => ({
       projectKey: input.projectKey,
       state: 'current',
@@ -129,7 +168,7 @@ function fakeSyncActions(): ProjectSyncActionRunner {
 }
 
 describe('standard knowledge MCP profile', () => {
-  it('exposes seven bounded project-knowledge tools', async () => {
+  it('exposes ten bounded project-knowledge tools', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-mcp-'));
     roots.push(root);
     const registry = await VaultRegistry.load(path.join(root, 'config.json'));
@@ -162,6 +201,9 @@ describe('standard knowledge MCP profile', () => {
       'finalize_projection',
       'get_project_snapshot',
       'get_project_sync_status',
+      'materialize_project_views',
+      'preview_project_views',
+      'recall_project_knowledge',
       'run_project_sync_action',
       'search_project_context',
       'write_project_knowledge',
@@ -232,8 +274,9 @@ describe('standard knowledge MCP profile', () => {
       adminClient.connect(adminClientTransport),
     ]);
     const adminTools = await adminClient.listTools();
+    expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(9_000);
     expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(
-      JSON.stringify(adminTools.tools).length * 0.5,
+      JSON.stringify(adminTools.tools).length * 0.75,
     );
     await adminClient.close();
     await adminServer.close();
@@ -283,6 +326,9 @@ describe('standard knowledge MCP profile', () => {
       arguments: {
         projectKey: 'MC-Platform',
         actor: 'codex',
+        message: 'Record the SQL decision',
+        reason: 'decision',
+        idempotencyKey: 'write-1',
         changes: [
           { operation: 'create', item: { kind: 'decision', title: 'Use SQL' } },
         ],
@@ -290,6 +336,34 @@ describe('standard knowledge MCP profile', () => {
     });
     expect(write.isError).not.toBe(true);
     expect(write.structuredContent).toMatchObject({ dbRevision: 8 });
+
+    const recall = await client.callTool({
+      name: 'recall_project_knowledge',
+      arguments: {
+        projectKey: 'MC-Platform',
+        intent: 'orient',
+        knownStateHash: 'a'.repeat(64),
+      },
+    });
+    expect(recall.structuredContent).toMatchObject({ status: 'not_modified' });
+
+    const preview = await client.callTool({
+      name: 'preview_project_views',
+      arguments: { projectKey: 'MC-Platform', worktreePath: 'C:/repo' },
+    });
+    expect(preview.structuredContent).toMatchObject({
+      previewHash: 'b'.repeat(64),
+    });
+
+    const materialized = await client.callTool({
+      name: 'materialize_project_views',
+      arguments: {
+        projectKey: 'MC-Platform',
+        worktreePath: 'C:/repo',
+        previewHash: 'b'.repeat(64),
+      },
+    });
+    expect(materialized.structuredContent).toMatchObject({ published: 2 });
 
     const finalized = await client.callTool({
       name: 'finalize_projection',

@@ -33,6 +33,8 @@ describe('project knowledge migrations', () => {
       'domain_path_rules',
       'domain_sync_states',
       'worker_health',
+      'knowledge_change_sets',
+      'knowledge_change_entries',
     ]) {
       expect(sql).toContain(`project_knowledge.${table}`);
     }
@@ -62,7 +64,11 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('required_capability text');
     expect(sql).toContain('parent_job_id uuid');
     expect(sql).toContain('outbox_jobs_one_live_key');
-    expect(knowledgeMigrations.at(-1)?.id).toBe('0007_shared_worker_queue');
+    expect(knowledgeMigrations.at(-1)?.id).toBe(
+      '0008_low_token_change_history_and_lazy_views',
+    );
+    expect(sql).toContain('idempotency_key text NOT NULL');
+    expect(sql).toContain("'deferred'");
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);

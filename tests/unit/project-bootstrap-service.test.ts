@@ -61,14 +61,23 @@ describe('project bootstrap service', () => {
     expect(result.files.map((file) => file.path)).toEqual([
       'config.json',
       'mapping.yaml',
+      'views.yaml',
       'README.md',
     ]);
     expect(await readdir(localDirectory)).toEqual(
-      expect.arrayContaining(['config.json', 'mapping.yaml', 'README.md']),
+      expect.arrayContaining([
+        'config.json',
+        'mapping.yaml',
+        'views.yaml',
+        'README.md',
+      ]),
     );
     expect(
       await readFile(path.join(localDirectory, 'config.json'), 'utf8'),
     ).toContain('"vault": "personal"');
+    expect(
+      await readFile(path.join(localDirectory, 'views.yaml'), 'utf8'),
+    ).toContain('projectionMode: lazy');
     expect(result.detected).toContain('00 - Project Home.md');
   });
 
