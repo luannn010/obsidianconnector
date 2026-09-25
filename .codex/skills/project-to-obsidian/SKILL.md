@@ -5,6 +5,18 @@ description: Use when retrieving, auditing, synchronizing, updating, or publishi
 
 # Project to Obsidian
 
+## Worker-backed source refresh
+
+When the user requests a refresh, or compact status returns `REINDEX_SOURCE`, run the zero-AI queue command from the deployed worker checkout instead of reading changed files into the conversation. A refresh-only request starts with this command; do not call `get_project_snapshot` first:
+
+```powershell
+& 'C:\Users\luann\Documents\Obisidian COnnector\.worktrees\shared-workers\scripts\sync-project-knowledge.ps1' -ProjectKey <project-key> -WorktreePath '<exact-worktree-path>' -Wait
+```
+
+The command deduplicates `source_sync` by worktree, starts the Windows Docker worker, and returns the authoritative `sync_runs` receipt. Treat `snapshotState: reused` as success: snapshots are created only when HEAD, the content-aware dirty fingerprint, or parser revision changed. Task or prompt completion does not create a snapshot. The Windows container normally exits after 60 idle seconds.
+
+Embedding jobs are already in PostgreSQL. A healthy Debian worker claims them without another request or conversational tokens. If the receipt has pending child jobs but no failures, report them as queued and make at most one compact status call; do not poll. Use `-LocalEmbeddingFallback` only when the Debian embedding heartbeat is stale.
+
 ## Local `.obsidian-local` mapping bootstrap
 
 When the local filesystem ObsidianConnector is connected, initialize a new
@@ -31,10 +43,10 @@ PostgreSQL `project_knowledge` is the canonical knowledge store. Git, tests, mig
 2. If freshness is `current`, failed and pending jobs are zero, and no actions exist, stop. Do not fetch a snapshot or search.
 3. If `summary.failedJobs` is greater than zero, report `topIssues` and ask for an explicit override before automatic repair.
 4. Execute only `topSuggestedActions`, in returned order, after their `dependsOn` actions:
-   - `REINDEX_SOURCE`: let the worker refresh only `changedPaths`. When reindexing changes the fingerprint, make one new compact status call.
+   - `REINDEX_SOURCE`: call `run_project_sync_action` with the exact suggested action or action id. When reindexing changes the fingerprint, make one new compact status call.
    - `UPDATE_KNOWLEDGE`: retrieve only the action's exact `changedPaths`. Use exact search and expand only returned `chunk:` handles or action `evidenceRefs`, up to eight refs. Patch the resolved `relatedItemIds`; do not run a broad search.
    - `VERIFY_EVIDENCE`: check only listed evidence refs and paths against Git, tests, migrations, or configuration. Attach authoritative evidence or leave the blocker unresolved.
-   - `FINALIZE_PROJECTION`: leave publishing to the worker lifecycle. In quick mode, do not poll projection-only work; use `compact: false` only when the user requests deep troubleshooting.
+   - `FINALIZE_PROJECTION`: call `finalize_projection` or `run_project_sync_action` instead of shelling out. In quick mode, do not poll projection-only work; use `compact: false` only when the user requests deep troubleshooting.
 5. After semantic writes, call compact status once and report changed items, unresolved blockers, estimated writes/tokens, and the final `cacheKey`. Do not re-read unchanged context.
 
 Treat `omitted` counts as a high-cost batch signal. Stop before expanding it and request deep mode or a narrower worktree/domain scope.
@@ -49,4 +61,4 @@ Use `write_project_knowledge` for create, patch, append, and supersede. Batch re
 
 Manual edits under `Published/` are conflicts. Preserve them through `Inbox/Conflicts`, update canonical knowledge, then regenerate. Never use `.obsidian/workspace.json` as evidence. Exclude secrets, credentials, logs, dependencies, and build output.
 
-The routine profile contains exactly `get_project_snapshot`, `search_project_context`, `expand_project_context`, `write_project_knowledge`, and `get_project_sync_status`. Vault/file tools are admin-only.
+The routine profile contains `get_project_snapshot`, `get_project_sync_status`, `search_project_context`, `expand_project_context`, `write_project_knowledge`, `finalize_projection`, and `run_project_sync_action`. Vault/file tools are admin-only.

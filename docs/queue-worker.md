@@ -24,4 +24,15 @@ Run source synchronization without a model call:
 
 The command hashes modified and untracked file contents, scans only the requested worktree, publishes from Windows, and completes its `sync_runs` receipt only when the final source fingerprint still matches the initial one. Use `-LocalEmbeddingFallback` only during a planned Debian outage.
 
+If compact status reports only pending projection work, finalize generated vault notes without a model call:
+
+```powershell
+.\scripts\finalize-project-projection.ps1 `
+  -ProjectKey MC-Platform `
+  -WorktreePath 'C:\Users\luann\Documents\MC-Platform' `
+  -Wait
+```
+
+The finalizer runs the status-first projection path in deep mode, publishes managed `Published/` notes from PostgreSQL state, waits up to five minutes by default, and exits nonzero when failed jobs, projection conflicts, stale projections, or pending jobs remain.
+
 The queue worker marks obsolete jobs `superseded` with a structured reason. Its daily cleanup permanently removes only superseded snapshots older than seven days that have no source evidence, task, file activity, note projection, or domain synchronization references.
