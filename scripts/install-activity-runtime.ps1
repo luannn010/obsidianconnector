@@ -10,6 +10,7 @@ $RepositoryPath = (Resolve-Path -LiteralPath $RepositoryPath).Path
 $hookEntrypoint = Join-Path $RepositoryPath 'dist\activity-hook.js'
 $daemonScript = Join-Path $RepositoryPath 'scripts\run-activity-daemon.ps1'
 $workerScript = Join-Path $RepositoryPath 'scripts\run-knowledge-worker.ps1'
+$mcpLauncher = Join-Path $RepositoryPath 'scripts\run-obsidian-local.ps1'
 if (-not (Test-Path -LiteralPath $hookEntrypoint -PathType Leaf)) {
   throw "Run npm run build before installing hooks: $hookEntrypoint"
 }
@@ -118,7 +119,7 @@ function Add-ClaudeCommandHook(
 $node = (Get-Command node -ErrorAction Stop).Source
 $hookBase = '"{0}" "{1}" --agent' -f $node, $hookEntrypoint
 $claudeHookBase = '& "{0}" "{1}" --agent' -f $node, $hookEntrypoint
-$mcpEntrypoint = Join-Path $RepositoryPath 'dist\index.js'
+$mcpCommand = (Get-Command pwsh -ErrorAction Stop).Source
 $mcpPath = Join-Path $ProjectPath '.mcp.json'
 $mcp = Read-JsonMap $mcpPath
 if (-not $mcp.ContainsKey('mcpServers')) { $mcp.mcpServers = @{} }
@@ -137,8 +138,8 @@ if (-not $mcpEnvironment.ContainsKey('OBSIDIAN_VAULT_ROOT')) {
 $mcpEnvironment.OBSIDIAN_MCP_PROFILE = 'standard'
 $mcp.mcpServers['obsidian-local'] = @{
   type = 'stdio'
-  command = $node
-  args = @($mcpEntrypoint)
+  command = $mcpCommand
+  args = @('-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-File', $mcpLauncher, '-RepositoryPath', $RepositoryPath)
   env = $mcpEnvironment
 }
 $mcp | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $mcpPath -Encoding utf8NoBOM
