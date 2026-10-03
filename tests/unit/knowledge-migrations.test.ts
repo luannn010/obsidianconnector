@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { knowledgeMigrations } from '../../src/knowledge/migrations.js';
 import {
@@ -85,6 +86,12 @@ describe('project knowledge migrations', () => {
     expect(migration?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS mcp_metrics.tool_calls (',
     );
+    expect(migration).toBeDefined();
+    expect(createHash('sha256').update(migration!.sql).digest('hex')).toBe(
+      'dad4488f112a9664b62b02f8c0a7aabcb3ac68156690b88952b45a876b11e205',
+    );
+    expect(migration!.sql).toContain("date_trunc('hour', started_at, 'UTC')");
+    expect(migration!.sql).toContain('tool_calls_started');
     expect(knowledgeMigrations.at(-1)?.id).toBe('0010_mcp_tool_call_metrics');
   });
 

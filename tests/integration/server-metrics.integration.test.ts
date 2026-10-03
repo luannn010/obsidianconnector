@@ -76,4 +76,18 @@ describe('obsidian-local tool-call metrics', () => {
     });
     expect(result.isError).toBeFalsy();
   });
+
+  it('starts and serves tools when the metrics package cannot be loaded', async () => {
+    const rows: ToolCallRecord[] = [];
+    const client = await connect({
+      metrics: { record: (record) => rows.push(record) },
+      metricsModule: null,
+    });
+    const result = await client.callTool({
+      name: 'list_vaults',
+      arguments: {},
+    });
+    expect(result.isError).toBeFalsy();
+    expect(rows).toHaveLength(0);
+  });
 });

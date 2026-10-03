@@ -1,5 +1,3 @@
-import { metricsMigrationSql } from '@mcp-dashboard/metrics';
-
 export interface KnowledgeMigration {
   id: string;
   sql: string;
@@ -608,6 +606,59 @@ ALTER TABLE project_knowledge.note_projections
   },
   {
     id: '0010_mcp_tool_call_metrics',
-    sql: metricsMigrationSql(),
+    sql: String.raw`
+CREATE SCHEMA IF NOT EXISTS mcp_metrics;
+CREATE TABLE IF NOT EXISTS mcp_metrics.tool_calls (
+  id bigserial PRIMARY KEY,
+  server text NOT NULL CHECK (length(server) BETWEEN 1 AND 64),
+  project_key text CHECK (project_key IS NULL OR length(project_key) <= 200),
+  machine text CHECK (machine IS NULL OR length(machine) <= 128),
+  tool text NOT NULL CHECK (length(tool) BETWEEN 1 AND 128),
+  started_at timestamptz NOT NULL,
+  duration_ms integer NOT NULL CHECK (duration_ms >= 0),
+  ok boolean NOT NULL,
+  error_code text CHECK (error_code IS NULL OR length(error_code) <= 64)
+);
+CREATE INDEX IF NOT EXISTS tool_calls_server_started ON mcp_metrics.tool_calls(server, started_at DESC);
+CREATE INDEX IF NOT EXISTS tool_calls_project_started ON mcp_metrics.tool_calls(project_key, started_at DESC) WHERE project_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tool_calls_started ON mcp_metrics.tool_calls(started_at);
+CREATE TABLE IF NOT EXISTS mcp_metrics.tool_calls_hourly (
+  bucket timestamptz NOT NULL,
+  server text NOT NULL,
+  project_key text NOT NULL DEFAULT '',
+  machine text NOT NULL DEFAULT '',
+  tool text NOT NULL,
+  calls integer NOT NULL,
+  errors integer NOT NULL,
+  total_ms bigint NOT NULL,
+  p50_ms integer NOT NULL,
+  p95_ms integer NOT NULL,
+  max_ms integer NOT NULL,
+  PRIMARY KEY (bucket, server, project_key, machine, tool)
+);
+CREATE OR REPLACE FUNCTION mcp_metrics.rollup_and_prune(retention interval DEFAULT interval '30 days')
+RETURNS integer LANGUAGE plpgsql AS $fn$
+DECLARE pruned integer;
+BEGIN
+  INSERT INTO mcp_metrics.tool_calls_hourly AS h
+    (bucket, server, project_key, machine, tool, calls, errors, total_ms, p50_ms, p95_ms, max_ms)
+  SELECT date_trunc('hour', started_at, 'UTC'), server, coalesce(project_key, ''), coalesce(machine, ''), tool,
+         count(*), count(*) FILTER (WHERE NOT ok), sum(duration_ms),
+         percentile_disc(0.5) WITHIN GROUP (ORDER BY duration_ms),
+         percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms),
+         max(duration_ms)
+  FROM mcp_metrics.tool_calls
+  WHERE started_at >= date_trunc('hour', now(), 'UTC') - interval '48 hours'
+    AND started_at < date_trunc('hour', now(), 'UTC')
+  GROUP BY date_trunc('hour', started_at, 'UTC'), server, coalesce(project_key, ''), coalesce(machine, ''), tool
+  ON CONFLICT (bucket, server, project_key, machine, tool) DO UPDATE
+    SET calls = EXCLUDED.calls, errors = EXCLUDED.errors, total_ms = EXCLUDED.total_ms,
+        p50_ms = EXCLUDED.p50_ms, p95_ms = EXCLUDED.p95_ms, max_ms = EXCLUDED.max_ms;
+  DELETE FROM mcp_metrics.tool_calls WHERE started_at < now() - retention;
+  GET DIAGNOSTICS pruned = ROW_COUNT;
+  RETURN pruned;
+END
+$fn$;
+`,
   },
 ];
