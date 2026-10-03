@@ -39,6 +39,7 @@ export interface DomainAuditInput {
   evidence: DomainEvidenceLink[];
   projections: DomainProjectionInput[];
   comparisonComplete: boolean;
+  ignoredPaths?: string[];
 }
 
 export interface DomainAuditResult {
@@ -57,6 +58,49 @@ export interface DomainAuditResult {
     evidenceRefs: string[];
   }>;
   unmappedChanges: string[];
+}
+
+export interface DomainManifestValidation {
+  unmapped: string[];
+  overlapping: Array<{ path: string; domains: string[] }>;
+}
+
+export interface ParsedDomainManifest {
+  rules: DomainPathRule[];
+  ignored: string[];
+}
+
+export function validateDomainManifest(
+  paths: string[],
+  rules: DomainPathRule[],
+  ignored: string[] = [],
+): DomainManifestValidation {
+  const compiledRules = rules.map((rule) => ({
+    ...rule,
+    matcher: globPattern(rule.pattern),
+    exclusions: (rule.exclusions ?? []).map(globPattern),
+  }));
+  const unmapped: string[] = [];
+  const overlapping: Array<{ path: string; domains: string[] }> = [];
+  const ignoredMatchers = ignored.map(globPattern);
+  for (const rawPath of paths) {
+    const normalized = normalizePath(rawPath);
+    if (ignoredMatchers.some((matcher) => matcher.test(normalized))) continue;
+    const domains = [
+      ...new Set(
+        compiledRules
+          .filter(
+            (rule) =>
+              rule.matcher.test(normalized) &&
+              !rule.exclusions.some((matcher) => matcher.test(normalized)),
+          )
+          .map((rule) => rule.domain),
+      ),
+    ].sort();
+    if (domains.length === 0) unmapped.push(normalized);
+    if (domains.length > 1) overlapping.push({ path: normalized, domains });
+  }
+  return { unmapped: [...new Set(unmapped)].sort(), overlapping };
 }
 
 function normalizePath(value: string): string {
@@ -86,6 +130,7 @@ function globPattern(pattern: string): RegExp {
 
 const domainManifestSchema = z.object({
   version: z.literal(1),
+  ignored: z.array(z.string().trim().min(1)).default([]),
   domains: z.record(
     z.string().trim().min(1),
     z.object({
@@ -96,8 +141,12 @@ const domainManifestSchema = z.object({
 });
 
 export function parseDomainManifest(content: string): DomainPathRule[] {
+  return parseDomainManifestDocument(content).rules;
+}
+
+export function parseDomainManifestDocument(content: string): ParsedDomainManifest {
   const manifest = domainManifestSchema.parse(JSON.parse(content));
-  return Object.entries(manifest.domains)
+  const rules = Object.entries(manifest.domains)
     .sort(([left], [right]) => left.localeCompare(right))
     .flatMap(([domain, definition]) =>
       definition.include.map((pattern) => ({
@@ -108,6 +157,7 @@ export function parseDomainManifest(content: string): DomainPathRule[] {
           : {}),
       })),
     );
+  return { rules, ignored: manifest.ignored.map(normalizePath) };
 }
 
 export function auditDomainSync(input: DomainAuditInput): DomainAuditResult {
@@ -131,9 +181,11 @@ export function auditDomainSync(input: DomainAuditInput): DomainAuditResult {
     path: normalizePath(link.path),
   }));
   const unmappedChanges: string[] = [];
+  const ignoredMatchers = (input.ignoredPaths ?? []).map(globPattern);
 
   for (const rawPath of input.changedPaths) {
     const changedPath = normalizePath(rawPath);
+    if (ignoredMatchers.some((matcher) => matcher.test(changedPath))) continue;
     const explicit = new Set(
       compiledRules
         .filter(

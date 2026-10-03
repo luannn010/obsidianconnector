@@ -556,6 +556,10 @@ export class PgKnowledgeStore implements KnowledgeStore {
             ORDER BY checked_at DESC LIMIT 1
           ) df ON true
           WHERE c.project_id = $1 AND c.active AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id = $2)
+            AND ($5::uuid IS NULL OR c.worktree_id IS NULL OR c.worktree_id=$5)
+            AND ($6::text[] IS NULL OR c.kind=ANY($6))
+            AND ($7::text[] IS NULL OR c.domain=ANY($7))
+            AND ($8::text[] IS NULL OR c.service=ANY($8))
             AND ($3 = c.parent_ref OR lower(c.title) = lower($3)
               OR lower(c.metadata->>'path') = lower($3) OR lower(c.metadata->>'symbol') = lower($3)
               OR lower(c.metadata->>'endpoint') = lower($3) OR lower(c.metadata->>'schema_table') = lower($3))
@@ -567,6 +571,9 @@ export class PgKnowledgeStore implements KnowledgeStore {
             input.query,
             projectRow.db_revision,
             input.worktreeId ?? null,
+            input.filters?.kinds ?? null,
+            input.filters?.domains ?? null,
+            input.filters?.services ?? null,
           ],
         );
         rows = result.rows;
@@ -602,6 +609,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
           domainFilter,
           serviceFilter,
           projectRow.db_revision,
+          input.worktreeId ?? null,
         ];
         const sql = embedding
           ? `
@@ -609,6 +617,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
             SELECT id, row_number() OVER (ORDER BY paradedb.score(id) DESC) AS rank
             FROM project_knowledge.search_chunks WHERE content @@@ $3 AND project_id = $1 AND active
               AND ($2::uuid IS NULL OR snapshot_id IS NULL OR snapshot_id=$2)
+              AND ($10::uuid IS NULL OR worktree_id IS NULL OR worktree_id=$10)
               AND ($6::text[] IS NULL OR kind=ANY($6)) AND ($7::text[] IS NULL OR domain=ANY($7))
               AND ($8::text[] IS NULL OR service=ANY($8)) LIMIT $4
           ), vector AS (
@@ -616,6 +625,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
             FROM project_knowledge.search_chunks
             WHERE project_id = $1 AND active AND embedding IS NOT NULL
               AND ($2::uuid IS NULL OR snapshot_id IS NULL OR snapshot_id=$2)
+              AND ($10::uuid IS NULL OR worktree_id IS NULL OR worktree_id=$10)
               AND ($6::text[] IS NULL OR kind=ANY($6)) AND ($7::text[] IS NULL OR domain=ANY($7))
               AND ($8::text[] IS NULL OR service=ANY($8))
             ORDER BY embedding <=> $5::vector LIMIT $4
@@ -636,6 +646,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
           ) df ON true
           WHERE (b.id IS NOT NULL OR v.id IS NOT NULL) AND c.project_id=$1 AND c.active
             AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$2)
+            AND ($10::uuid IS NULL OR c.worktree_id IS NULL OR c.worktree_id=$10)
             AND ($6::text[] IS NULL OR c.kind=ANY($6)) AND ($7::text[] IS NULL OR c.domain=ANY($7))
             AND ($8::text[] IS NULL OR c.service=ANY($8))
           ORDER BY score DESC LIMIT $4 OFFSET ${offset}
@@ -645,6 +656,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
             SELECT id,paradedb.score(id) AS score FROM project_knowledge.search_chunks
             WHERE content @@@ $3 AND project_id=$1 AND active
               AND ($2::uuid IS NULL OR snapshot_id IS NULL OR snapshot_id=$2)
+              AND ($10::uuid IS NULL OR worktree_id IS NULL OR worktree_id=$10)
               AND ($6::text[] IS NULL OR kind=ANY($6)) AND ($7::text[] IS NULL OR domain=ANY($7))
               AND ($8::text[] IS NULL OR service=ANY($8))
             ORDER BY score DESC LIMIT $4 OFFSET ${offset}
@@ -664,15 +676,24 @@ export class PgKnowledgeStore implements KnowledgeStore {
           ) df ON true
           WHERE c.project_id=$1 AND $5::text IS NULL
             AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$2)
+            AND ($10::uuid IS NULL OR c.worktree_id IS NULL OR c.worktree_id=$10)
             AND ($6::text[] IS NULL OR c.kind=ANY($6)) AND ($7::text[] IS NULL OR c.domain=ANY($7))
             AND ($8::text[] IS NULL OR c.service=ANY($8))
           ORDER BY b.score DESC LIMIT $4
         `;
         rows = (await this.pool.query<ChunkRow>(sql, values)).rows;
       }
-      let hits = [
-        ...new Map(rows.map((row) => [row.id, hitFromChunk(row)])).values(),
-      ];
+      // The same source text can be indexed by several worktree snapshots.
+      // Keep one citation per source path and content hash so repeated copies
+      // do not consume the small recall budget.
+      const uniqueHits = new Map<string, ContextHit>();
+      for (const row of rows) {
+        const key = row.item_id
+          ? `item:${row.item_id}`
+          : `source:${String(row.metadata?.path ?? row.id)}:${row.content_hash}`;
+        if (!uniqueHits.has(key)) uniqueHits.set(key, hitFromChunk(row));
+      }
+      let hits = [...uniqueHits.values()];
       if (
         usedHybridRetrieval &&
         this.options.rerankerEnabled &&
@@ -891,6 +912,17 @@ export class PgKnowledgeStore implements KnowledgeStore {
           'Project is not registered',
           false,
         );
+      if (input.idempotencyKey) {
+        const replay = await client.query<{ receipt: KnowledgeWriteResult }>(
+          `SELECT receipt FROM project_knowledge.knowledge_change_sets
+           WHERE project_id=$1 AND idempotency_key=$2`,
+          [projectRow.project_id, input.idempotencyKey],
+        );
+        if (replay.rows[0]?.receipt) {
+          await client.query('COMMIT');
+          return { ...replay.rows[0].receipt, replayed: true };
+        }
+      }
       if (
         input.expectedProjectRevision !== undefined &&
         Number(projectRow.db_revision) !== input.expectedProjectRevision
@@ -906,17 +938,6 @@ export class PgKnowledgeStore implements KnowledgeStore {
         );
       }
       const revisionBefore = Number(projectRow.db_revision);
-      if (input.idempotencyKey) {
-        const replay = await client.query<{ receipt: KnowledgeWriteResult }>(
-          `SELECT receipt FROM project_knowledge.knowledge_change_sets
-           WHERE project_id=$1 AND idempotency_key=$2`,
-          [projectRow.project_id, input.idempotencyKey],
-        );
-        if (replay.rows[0]?.receipt) {
-          await client.query('COMMIT');
-          return { ...replay.rows[0].receipt, replayed: true };
-        }
-      }
       const nextRevision = revisionBefore + 1;
       const requestsVerifiedCompletion = normalizedChanges.some(
         (change) =>

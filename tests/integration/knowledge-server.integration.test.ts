@@ -164,11 +164,16 @@ function fakeSyncActions(): ProjectSyncActionRunner {
       touchedPaths: ['Published/Architecture.md'],
       timeoutMs: input.timeoutSeconds * 1000,
     }),
+    syncProjectOnDemand: async () => ({
+      projectKey: 'Host-Mesh',
+      state: 'completed',
+      dbRevision: 9,
+    }),
   };
 }
 
 describe('standard knowledge MCP profile', () => {
-  it('exposes ten bounded project-knowledge tools', async () => {
+  it('exposes eleven bounded project-knowledge tools', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'knowledge-mcp-'));
     roots.push(root);
     const registry = await VaultRegistry.load(path.join(root, 'config.json'));
@@ -206,6 +211,7 @@ describe('standard knowledge MCP profile', () => {
       'recall_project_knowledge',
       'run_project_sync_action',
       'search_project_context',
+      'sync_project_on_demand',
       'write_project_knowledge',
     ]);
     expect(JSON.stringify(tools.tools).length).toBeLessThan(22_000);
@@ -274,9 +280,9 @@ describe('standard knowledge MCP profile', () => {
       adminClient.connect(adminClientTransport),
     ]);
     const adminTools = await adminClient.listTools();
-    expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(9_000);
+    expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(10_000);
     expect(JSON.stringify(tools.tools).length).toBeLessThanOrEqual(
-      JSON.stringify(adminTools.tools).length * 0.75,
+      JSON.stringify(adminTools.tools).length * 0.8,
     );
     await adminClient.close();
     await adminServer.close();

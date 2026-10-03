@@ -30,6 +30,8 @@ export interface ProjectViewsInput {
   views?: Array<'project-now' | 'worktree-now'>;
   worktreeIds?: string[];
   knownPreviewHash?: string;
+  /** Git-authoritative paths reconciled by the operation runner. */
+  liveWorktreePaths?: string[];
 }
 
 export interface MaterializeProjectViewsInput extends ProjectViewsInput {
@@ -371,18 +373,29 @@ export class LazyProjectViewsService {
       }>(
         `SELECT worktree.id,worktree.path,worktree.branch,worktree.head_commit,
            worktree.dirty_hash,cardinality(worktree.dirty_paths) AS dirty_path_count,
-           worktree.last_seen_at,snapshot.id AS snapshot_id,
+           COALESCE((SELECT max(task.last_seen_at) FROM project_knowledge.agent_tasks task
+             WHERE task.worktree_id=worktree.id),snapshot.activated_at,
+             (SELECT updated_at FROM project_knowledge.projects WHERE project_id=worktree.project_id)) AS last_seen_at,
+           snapshot.id AS snapshot_id,
            COALESCE(snapshot.head_commit=worktree.head_commit AND snapshot.dirty_hash IS NOT DISTINCT FROM worktree.dirty_hash,false) AS snapshot_fresh
          FROM project_knowledge.worktrees worktree
          LEFT JOIN LATERAL (
-           SELECT id,head_commit,dirty_hash FROM project_knowledge.source_snapshots
+           SELECT id,head_commit,dirty_hash,activated_at FROM project_knowledge.source_snapshots
            WHERE worktree_id=worktree.id AND state='active'
            ORDER BY activated_at DESC NULLS LAST LIMIT 1
          ) snapshot ON true
          WHERE worktree.project_id=$1 AND worktree.registered ORDER BY worktree.branch,worktree.id`,
         [project.project_id],
       )
-    ).rows;
+    ).rows.filter(
+      (row) =>
+        !input.liveWorktreePaths ||
+        input.liveWorktreePaths.some(
+          (livePath) =>
+            path.resolve(livePath).toLowerCase() ===
+            path.resolve(row.path).toLowerCase(),
+        ),
+    );
     const tasks = (
       await this.pool.query<{
         id: string;
@@ -433,7 +446,7 @@ export class LazyProjectViewsService {
          LEFT JOIN project_knowledge.knowledge_change_entries entry ON entry.change_set_id=change.id
          LEFT JOIN project_knowledge.work_items work ON work.item_id=entry.item_id
          LEFT JOIN project_knowledge.worktree_links link ON link.work_item_id=work.id
-         WHERE change.project_id=$1
+         WHERE change.project_id=$1 AND change.new_revision>change.base_revision
          GROUP BY change.id ORDER BY change.new_revision DESC LIMIT 500`,
         [project.project_id],
       )

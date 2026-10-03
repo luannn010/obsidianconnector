@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   auditDomainSync,
-  parseDomainManifest,
+  parseDomainManifestDocument,
   type DomainFreshness,
   type DomainPathRule,
 } from '../knowledge/domain-sync.js';
@@ -65,11 +65,23 @@ export async function importDomainManifest(
   });
   if (!content) return [];
 
-  const rules = parseDomainManifest(content);
+  const manifest = parseDomainManifestDocument(content);
+  const rules = manifest.rules;
   await database.query(
     "DELETE FROM project_knowledge.domain_path_rules WHERE project_id=$1 AND source='manifest'",
     [projectId],
   );
+  await database.query(
+    "DELETE FROM project_knowledge.domain_ignored_paths WHERE project_id=$1 AND source='manifest'",
+    [projectId],
+  );
+  for (const pattern of manifest.ignored) {
+    await database.query(
+      `INSERT INTO project_knowledge.domain_ignored_paths(project_id,path_glob,source)
+       VALUES($1,$2,'manifest') ON CONFLICT(project_id,path_glob) DO UPDATE SET source='manifest'`,
+      [projectId, pattern],
+    );
+  }
   const domainIds = new Map<string, string>();
   for (const domain of [...new Set(rules.map((rule) => rule.domain))]) {
     const row = (
@@ -172,6 +184,14 @@ export async function buildDomainSyncReport(
     )
   ).rows;
 
+  const ignoredPaths = (
+    await database.query<{ path_glob: string }>(
+      `SELECT path_glob FROM project_knowledge.domain_ignored_paths
+       WHERE project_id=$1 ORDER BY path_glob`,
+      [input.projectId],
+    )
+  ).rows.map((row) => row.path_glob);
+
   const freshnessRows = worktree.snapshot_id
     ? (
         await database.query<{ domain: string; state: DomainFreshness }>(
@@ -271,6 +291,7 @@ export async function buildDomainSyncReport(
         projectionRows.length &&
         projectionRows.every((row) => row.source_snapshot_id),
     ),
+    ignoredPaths,
   });
   return {
     worktreeId: worktree.id,

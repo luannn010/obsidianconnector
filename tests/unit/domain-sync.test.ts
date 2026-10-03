@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   auditDomainSync,
   parseDomainManifest,
+  validateDomainManifest,
 } from '../../src/knowledge/domain-sync.js';
 
 const projections = [
@@ -22,6 +23,68 @@ const projections = [
 ];
 
 describe('domain sync audit', () => {
+  it('reports ignored local settings separately from unowned product paths', () => {
+    const rules = parseDomainManifest(
+      JSON.stringify({
+        version: 1,
+        domains: {
+          'Maintenance and previews': {
+            include: ['.claude/launch.json', '.design-sync/previews/**'],
+          },
+        },
+      }),
+    );
+    expect(validateDomainManifest([
+      '.claude/launch.json',
+      '.claude/settings.local.json',
+      '.design-sync/previews/Panel.tsx',
+    ], rules)).toEqual({
+      unmapped: ['.claude/settings.local.json'],
+      overlapping: [],
+    });
+  });
+
+  it('reports accidental ownership overlap before manifest import', () => {
+    const result = validateDomainManifest(
+      ['packages/admin/app/runtime.js', 'packages/shared/auth/index.js'],
+      [
+        { domain: 'Administration UI', pattern: 'packages/admin/**' },
+        { domain: 'Administration platform', pattern: 'packages/admin/**' },
+        { domain: 'Shared platform libraries', pattern: 'packages/shared/**' },
+      ],
+    );
+    expect(result.unmapped).toEqual([]);
+    expect(result.overlapping).toEqual([
+      {
+        path: 'packages/admin/app/runtime.js',
+        domains: ['Administration UI', 'Administration platform'],
+      },
+    ]);
+  });
+
+  it('excludes explicitly ignored local settings from unmapped results', () => {
+    const result = validateDomainManifest(
+      ['.claude/settings.local.json', '.claude/launch.json'],
+      [{ domain: 'Maintenance and previews', pattern: '.claude/launch.json' }],
+      ['.claude/settings.local.json'],
+    );
+    expect(result).toEqual({ unmapped: [], overlapping: [] });
+  });
+
+  it('keeps ignored paths out of the live audit unmapped count', () => {
+    const result = auditDomainSync({
+      currentCommit: 'head',
+      databaseRevision: 1,
+      changedPaths: ['.claude/settings.local.json'],
+      rules: [],
+      evidence: [],
+      projections: [],
+      comparisonComplete: true,
+      ignoredPaths: ['.claude/settings.local.json'],
+    });
+    expect(result.unmappedChanges).toEqual([]);
+  });
+
   it('parses versioned domain manifests and honors exclusions', () => {
     const rules = parseDomainManifest(
       JSON.stringify({

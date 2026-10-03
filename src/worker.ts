@@ -48,22 +48,23 @@ const pool = new Pool({
 });
 const singleton = await acquireSingletonLock(
   pool,
-  'obsidian-local-project-knowledge-worker',
+  'obsidian-local-project-knowledge-daemon',
 );
 if (!singleton.acquired) {
   console.error(JSON.stringify({ event: 'knowledge_worker_already_running' }));
   await pool.end();
   process.exit(0);
 }
-const embedder = runtime.embeddingBaseUrl
-  && process.env.PROJECT_KNOWLEDGE_PROCESS_EMBEDDINGS !== 'false'
-  ? new OpenAiCompatibleEmbeddingClient(
-      runtime.embeddingBaseUrl,
-      runtime.embeddingModel,
-      runtime.embeddingDimensions,
-      runtime.embeddingToken,
-    )
-  : undefined;
+const embedder =
+  runtime.embeddingBaseUrl &&
+  process.env.PROJECT_KNOWLEDGE_PROCESS_EMBEDDINGS !== 'false'
+    ? new OpenAiCompatibleEmbeddingClient(
+        runtime.embeddingBaseUrl,
+        runtime.embeddingModel,
+        runtime.embeddingDimensions,
+        runtime.embeddingToken,
+      )
+    : undefined;
 const worker = new KnowledgeWorker(pool, embedder, {
   name: runtime.embeddingModel,
   revision: runtime.embeddingRevision,
@@ -109,114 +110,129 @@ async function synchronize(): Promise<void> {
     return running;
   }
   running = (async () => {
-    do {
-      rerun = false;
-      const forceReindex = sourceRefreshRequested;
-      const runMaintenance = maintenanceRequested;
-      sourceRefreshRequested = false;
-      maintenanceRequested = false;
-      const cycle: Record<string, unknown> = {};
-      let knowledgeChanged = false;
-      let projectionFinalized = false;
-      try {
-        const plan = await runStatusFirstSync(
-          {
-            getStatus: () =>
-              statusStore.getProjectSyncStatus({
-                projectKey: project.projectKey,
-                changedOnly: true,
-                compact: true,
-                issueLimit: 10,
-                actionLimit: 10,
-              }),
-            reindexSource: async (actions) => {
-              const targetPaths = [
-                ...new Set(
-                  actions
-                    .map((action) => action.worktreePath)
-                    .filter((worktreePath): worktreePath is string =>
-                      Boolean(worktreePath),
-                    ),
-                ),
-              ];
-              const worktrees = await synchronizeProjectWorktrees(
-                worker,
-                project,
-                {
-                  targetPaths:
-                    targetPaths.length > 0
-                      ? targetPaths
-                      : [project.repositoryPath],
-                },
-              );
-              cycle.worktrees = worktrees;
-              if (worktrees.indexedWorktrees.some((entry) => entry.changed))
-                rerun = true;
-            },
-            updateKnowledge: async () => {
-              cycle.documents = await worker.syncCanonicalDocuments(project);
-              cycle.structured =
-                await worker.syncStructuredDocumentation(project);
-              knowledgeChanged = true;
-            },
-            verifyEvidence: async () => {
-              if (cycle.documents === undefined)
+    const operationLock = await acquireSingletonLock(
+      pool,
+      'obsidian-local-project-knowledge-worker',
+    );
+    // Keep pending refresh flags intact when an explicit MCP operation is active.
+    // The periodic cycle will retry after the operation releases its lock.
+    if (!operationLock.acquired) return;
+    try {
+      do {
+        rerun = false;
+        const forceReindex = sourceRefreshRequested;
+        const runMaintenance = maintenanceRequested;
+        sourceRefreshRequested = false;
+        maintenanceRequested = false;
+        const cycle: Record<string, unknown> = {};
+        let knowledgeChanged = false;
+        let projectionFinalized = false;
+        try {
+          const plan = await runStatusFirstSync(
+            {
+              getStatus: () =>
+                statusStore.getProjectSyncStatus({
+                  projectKey: project.projectKey,
+                  changedOnly: true,
+                  compact: true,
+                  issueLimit: 10,
+                  actionLimit: 10,
+                }),
+              reindexSource: async (actions) => {
+                const targetPaths = [
+                  ...new Set(
+                    actions
+                      .map((action) => action.worktreePath)
+                      .filter((worktreePath): worktreePath is string =>
+                        Boolean(worktreePath),
+                      ),
+                  ),
+                ];
+                const worktrees = await synchronizeProjectWorktrees(
+                  worker,
+                  project,
+                  {
+                    targetPaths:
+                      targetPaths.length > 0
+                        ? targetPaths
+                        : [project.repositoryPath],
+                  },
+                );
+                cycle.worktrees = worktrees;
+                if (worktrees.indexedWorktrees.some((entry) => entry.changed))
+                  rerun = true;
+              },
+              updateKnowledge: async () => {
                 cycle.documents = await worker.syncCanonicalDocuments(project);
-              knowledgeChanged = true;
+                cycle.structured =
+                  await worker.syncStructuredDocumentation(project);
+                knowledgeChanged = true;
+              },
+              verifyEvidence: async () => {
+                if (cycle.documents === undefined)
+                  cycle.documents =
+                    await worker.syncCanonicalDocuments(project);
+                knowledgeChanged = true;
+              },
+              finalizeProjection: async () => {
+                cycle.embeddings = await drainQueueBatches(
+                  (limit) => worker.processEmbeddings(limit),
+                  50,
+                  MAX_EMBEDDING_JOBS_PER_CYCLE,
+                );
+                cycle.projections = await worker.publishVault(project);
+                projectionFinalized = true;
+              },
             },
-            finalizeProjection: async () => {
-              cycle.embeddings = await drainQueueBatches(
-                (limit) => worker.processEmbeddings(limit),
-                50,
-                MAX_EMBEDDING_JOBS_PER_CYCLE,
-              );
-              cycle.projections = await worker.publishVault(project);
-              projectionFinalized = true;
+            {
+              mode: 'deep',
+              forceReindex,
+              allowFailedJobs:
+                process.env.PROJECT_KNOWLEDGE_ALLOW_FAILED_REPAIR === 'true',
             },
-          },
-          {
-            mode: 'deep',
-            forceReindex,
-            allowFailedJobs:
-              process.env.PROJECT_KNOWLEDGE_ALLOW_FAILED_REPAIR === 'true',
-          },
-        );
-        cycle.plan = plan;
-
-        if (plan.state !== 'blocked' && runMaintenance) {
-          cycle.legacy = await worker.importLegacy(project);
-          cycle.delivery = await worker.normalizeLegacyDelivery(project);
-          cycle.inbox = await worker.processInbox(project);
-          knowledgeChanged =
-            knowledgeChanged ||
-            Number(cycle.delivery ?? 0) > 0 ||
-            Number(cycle.inbox ?? 0) > 0;
-        }
-
-        if (
-          plan.state !== 'blocked' &&
-          knowledgeChanged &&
-          !projectionFinalized
-        ) {
-          cycle.embeddings = await drainQueueBatches(
-            (limit) => worker.processEmbeddings(limit),
-            50,
-            MAX_EMBEDDING_JOBS_PER_CYCLE,
           );
-          cycle.projections = await worker.publishVault(project);
+          cycle.plan = plan;
+
+          if (plan.state !== 'blocked' && runMaintenance) {
+            cycle.legacy = await worker.importLegacy(project);
+            cycle.delivery = await worker.normalizeLegacyDelivery(project);
+            cycle.inbox = await worker.processInbox(project);
+            knowledgeChanged =
+              knowledgeChanged ||
+              Number(cycle.delivery ?? 0) > 0 ||
+              Number(cycle.inbox ?? 0) > 0;
+          }
+
+          if (
+            plan.state !== 'blocked' &&
+            knowledgeChanged &&
+            !projectionFinalized
+          ) {
+            cycle.embeddings = await drainQueueBatches(
+              (limit) => worker.processEmbeddings(limit),
+              50,
+              MAX_EMBEDDING_JOBS_PER_CYCLE,
+            );
+            cycle.projections = await worker.publishVault(project);
+          }
+        } catch (error) {
+          if (
+            !(error instanceof KnowledgeError) ||
+            error.code !== 'INDEX_STALE'
+          )
+            throw error;
+          Object.assign(cycle, await bootstrap());
         }
-      } catch (error) {
-        if (!(error instanceof KnowledgeError) || error.code !== 'INDEX_STALE')
-          throw error;
-        Object.assign(cycle, await bootstrap());
-      }
-      console.error(
-        JSON.stringify({
-          event: 'knowledge_sync',
-          ...cycle,
-        }),
-      );
-    } while (rerun);
+        console.error(
+          JSON.stringify({
+            event: 'knowledge_sync',
+            ...cycle,
+          }),
+        );
+      } while (rerun);
+    } finally {
+      await operationLock.release();
+    }
   })().finally(() => {
     running = undefined;
   });

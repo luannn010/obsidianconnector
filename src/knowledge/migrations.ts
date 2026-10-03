@@ -604,4 +604,18 @@ ALTER TABLE project_knowledge.note_projections
   CHECK (state IN ('current','pending','deferred','drifted','missing','failed'));
 `,
   },
+  {
+    id: '0009_domain_manifest_ignored_paths',
+    sql: String.raw`
+CREATE TABLE IF NOT EXISTS project_knowledge.domain_ignored_paths (
+  project_id uuid NOT NULL REFERENCES project_knowledge.projects(project_id) ON DELETE CASCADE,
+  path_glob text NOT NULL,
+  source text NOT NULL DEFAULT 'manifest',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id,path_glob)
+);
+CREATE INDEX IF NOT EXISTS domain_ignored_paths_project
+  ON project_knowledge.domain_ignored_paths(project_id);
+`,
+  },
 ];

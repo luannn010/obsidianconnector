@@ -271,6 +271,78 @@ describe('PostgreSQL knowledge store', () => {
     });
   });
 
+  it('deduplicates identical source chunks and applies filters to exact lookup', async () => {
+    const chunks = [
+      ...Array.from({ length: 3 }, (_, index) => ({
+        id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+        kind: 'documentation',
+        title: 'Architecture',
+        content: 'Repeated source text',
+        content_hash: 'same-source-hash',
+        item_id: null,
+        item_version: null,
+        stable_key: null,
+        metadata: { path: 'docs/architecture.md' },
+        head_commit: null,
+        db_revision: 4,
+      })),
+      {
+        id: '00000000-0000-4000-8000-000000000004',
+        kind: 'decision',
+        title: 'Architecture decision',
+        content: 'Keep the durable decision',
+        content_hash: 'decision-hash',
+        item_id: '10000000-0000-4000-8000-000000000001',
+        item_version: 1,
+        stable_key: 'decision:architecture',
+        metadata: { citation: 'knowledge:decision:v1' },
+        head_commit: null,
+        db_revision: 4,
+      },
+    ];
+    let exactValues: unknown[] | undefined;
+    let exactSql = '';
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('not used');
+      },
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        values?: unknown[],
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('FROM project_knowledge.projects'))
+          return {
+            rows: [
+              { project_id: 'project-1', db_revision: 4 },
+            ] as unknown as Row[],
+          };
+        exactSql = sql;
+        exactValues = values;
+        return { rows: chunks as unknown as Row[] };
+      },
+    };
+    const result = await new PgKnowledgeStore(pool).searchProjectContext({
+      projectKey: 'MC-Platform',
+      query: 'Architecture',
+      mode: 'exact',
+      filters: { kinds: ['documentation', 'decision'], domains: ['platform'] },
+      limit: 12,
+      maxTokens: 2000,
+    });
+    expect(exactValues?.slice(5, 8)).toEqual([
+      ['documentation', 'decision'],
+      ['platform'],
+      null,
+    ]);
+    expect(exactSql).toContain('c.worktree_id=$5');
+    expect(exactSql).toContain('c.kind=ANY($6)');
+    expect(exactSql).toContain('c.domain=ANY($7)');
+    expect(result.results.map((hit) => hit.title)).toEqual([
+      'Architecture',
+      'Architecture decision',
+    ]);
+  });
+
   it('falls back to BM25 and reranks only the leading hybrid candidates when embeddings are unavailable', async () => {
     const store = new PgKnowledgeStore(searchPool(25), {
       embedder: {
@@ -1562,6 +1634,51 @@ describe('PostgreSQL knowledge store', () => {
       }),
     ).rejects.toMatchObject({ code: 'VERSION_CONFLICT' });
     expect(client.statements.at(-1)).toBe('ROLLBACK');
+  });
+
+  it('replays a committed key even after the caller project revision becomes stale', async () => {
+    const receipt = {
+      changeSetId: 'committed',
+      revisionBefore: 1,
+      revisionAfter: 2,
+    };
+    const statements: string[] = [];
+    const client: PgClientLike = {
+      release() {},
+      async query<Row extends Record<string, unknown>>(
+        sql: string,
+      ): Promise<PgQueryResult<Row>> {
+        statements.push(sql);
+        if (sql.includes('FROM project_knowledge.projects'))
+          return {
+            rows: [
+              { project_id: 'project-1', db_revision: 3 },
+            ] as unknown as Row[],
+          };
+        if (sql.includes('SELECT receipt'))
+          return { rows: [{ receipt }] as unknown as Row[] };
+        return { rows: [] };
+      },
+    };
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: client.query,
+    });
+    await expect(
+      store.writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        idempotencyKey: 'committed',
+        expectedProjectRevision: 1,
+        changes: [{ operation: 'patch', item: { id: 'item-1' } }],
+      }),
+    ).resolves.toMatchObject({ ...receipt, replayed: true });
+    expect(
+      statements.some(
+        (sql) =>
+          sql.includes('INSERT') || sql.includes('UPDATE project_knowledge'),
+      ),
+    ).toBe(false);
   });
 
   it('returns no_change without bumping the project revision or queuing jobs', async () => {

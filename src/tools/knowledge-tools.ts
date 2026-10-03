@@ -312,4 +312,33 @@ export function registerKnowledgeTools(
         },
       ),
   );
+
+  server.registerTool(
+    'sync_project_on_demand',
+    {
+      description:
+        'Run a guarded project synchronization against a clean master worktree. Failed-job repair is fail-closed unless repairFailedJobs=true; publish requires a preview hash.',
+      inputSchema: {
+        projectKey,
+        worktreePath: z.string(),
+        vaultPath: z.string().optional(),
+        actionId: z.string().optional(),
+        domain: z.string().optional(),
+        repairFailedJobs: z.boolean(),
+        localEmbeddingFallback: z.boolean().default(false),
+        timeoutSeconds: z.number().int().positive().max(1800).default(300),
+        pollSeconds: z.number().int().positive().max(60).default(5),
+        publish: z.boolean().default(false),
+        previewHash: z.string().length(64).optional(),
+      },
+    },
+    async (input) =>
+      runTool(
+        () => syncActions.syncProjectOnDemand(input),
+        (data) => {
+          const result = data as { state?: string; dbRevision?: number };
+          return `On-demand sync ${result.state ?? 'finished'} at revision ${result.dbRevision ?? 'unknown'}`;
+        },
+      ),
+  );
 }

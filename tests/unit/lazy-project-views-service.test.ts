@@ -13,7 +13,11 @@ function pool(): PgPoolLike {
     query: async <Row extends Record<string, unknown>>(
       sql: string,
     ): Promise<PgQueryResult<Row>> => {
-      if (sql.includes('FROM project_knowledge.projects'))
+      if (
+        sql.startsWith(
+          'SELECT project_id,db_revision,updated_at FROM project_knowledge.projects',
+        )
+      )
         return {
           rows: [
             { project_id: 'project-1', db_revision: 7 },
@@ -55,6 +59,16 @@ function pool(): PgPoolLike {
 }
 
 describe('lazy project view service', () => {
+  it('excludes database-only worktrees absent from the reconciled Git list', async () => {
+    const service = new LazyProjectViewsService(pool());
+    const result = await service.preview({
+      projectKey: 'MC-Platform',
+      worktreePath: 'C:/repo',
+      vaultPath: 'C:/vault',
+      liveWorktreePaths: [],
+    });
+    expect(result.views.map((view) => view.viewId)).toEqual(['project-now']);
+  });
   it('previews changed views without publishing note bodies', async () => {
     const publish = vi.fn();
     const service = new LazyProjectViewsService(pool(), {

@@ -10,6 +10,7 @@ import type {
   ProjectViewsPreview,
   ProjectSyncActionInput,
   ProjectSyncActionRunner,
+  SyncProjectOnDemandInput,
   ProjectSyncStatus,
   SyncSuggestedAction,
 } from '../knowledge/types.js';
@@ -67,6 +68,7 @@ interface RunProjectSyncActionResult {
   source?: unknown;
   knowledge?: unknown;
   embeddings?: number;
+  repairedFailedJobs?: number;
 }
 
 function defaultVaultPath(projectKey: string): string {
@@ -164,7 +166,9 @@ function matchingActions(
   input: ProjectSyncActionInput,
 ): SyncSuggestedAction[] {
   const actions = (status.topSuggestedActions ?? []).filter(
-    (action) => action.action === input.action,
+    (action) =>
+      action.action === input.action &&
+      (!input.domain || action.domain === input.domain),
   );
   if (!input.actionId) return actions;
   return actions.filter((action) => action.actionId === input.actionId);
@@ -187,9 +191,10 @@ export class ProjectSyncActionsService implements ProjectSyncActionRunner {
   ): Promise<ProjectViewsPreview> {
     return this.withWorkerLock(async () => {
       const project = this.project(input);
-      await this.worker(false).syncWorktrees(project);
+      const live = await this.worker(false).syncWorktrees(project);
       return this.views.preview({
         ...input,
+        liveWorktreePaths: live.paths,
         vaultPath: project.vaultPath,
       });
     });
@@ -200,9 +205,10 @@ export class ProjectSyncActionsService implements ProjectSyncActionRunner {
   ): Promise<MaterializeProjectViewsResult> {
     return this.withWorkerLock(async () => {
       const project = this.project(input);
-      await this.worker(false).syncWorktrees(project);
+      const live = await this.worker(false).syncWorktrees(project);
       return this.views.materialize({
         ...input,
+        liveWorktreePaths: live.paths,
         vaultPath: project.vaultPath,
       });
     });
@@ -245,7 +251,11 @@ export class ProjectSyncActionsService implements ProjectSyncActionRunner {
 
     return this.withWorkerLock(async () => {
       const before = await this.status(input.projectKey);
+      let repairedFailedJobs = 0;
       if (queueSummary(before).failed > 0)
+        if (input.repairFailedJobs) {
+          repairedFailedJobs = await this.repairFailedJobs(input.projectKey);
+        } else
         return baseResult(
           'blocked',
           before,
@@ -283,7 +293,7 @@ export class ProjectSyncActionsService implements ProjectSyncActionRunner {
               50,
             )
           : 0;
-      await worker.publishVault(project);
+      if (input.publish !== false) await worker.publishVault(project);
       const final = await fingerprintWorktree(project.repositoryPath);
       if (initial.head !== final.head || initial.dirtyHash !== final.dirtyHash)
         throw new Error(
@@ -306,8 +316,76 @@ export class ProjectSyncActionsService implements ProjectSyncActionRunner {
         source,
         knowledge: { documents, structured },
         embeddings,
+        ...(repairedFailedJobs ? { repairedFailedJobs } : {}),
       };
     });
+  }
+
+  async syncProjectOnDemand(
+    input: SyncProjectOnDemandInput,
+  ): Promise<object> {
+    const initial = await fingerprintWorktree(input.worktreePath);
+    if (initial.branch !== 'master')
+      throw new Error('On-demand synchronization requires the canonical master worktree');
+    if (initial.status)
+      throw new Error('On-demand synchronization requires a clean canonical worktree');
+    const before = await this.status(input.projectKey);
+    if (queueSummary(before).failed > 0 && !input.repairFailedJobs)
+      return {
+        projectKey: input.projectKey,
+        state: 'blocked',
+        reason: 'failed-jobs',
+        before: { queues: queueSummary(before) },
+        after: { queues: queueSummary(before) },
+        failedJobRepair: { authorized: false, repaired: 0 },
+        unmappedPaths: before.domainSync?.unmappedChanges ?? [],
+      };
+    const action = await this.runProjectSyncAction({
+      ...input,
+      action: 'REINDEX_SOURCE',
+      publish: false,
+    });
+    const receipt: Record<string, unknown> = {
+      ...((action as unknown) as Record<string, unknown>),
+      mode: 'on_demand',
+      failedJobRepair: {
+        authorized: input.repairFailedJobs,
+        repaired: (action as RunProjectSyncActionResult).repairedFailedJobs ?? 0,
+      },
+      unmappedPaths:
+        ((action as { after?: { domainSync?: { unmappedChanges?: string[] } } }).after
+          ?.domainSync?.unmappedChanges ??
+          (await this.status(input.projectKey)).domainSync?.unmappedChanges ??
+          []),
+    };
+    if (input.publish) {
+      if (!input.previewHash)
+        throw new Error('publish=true requires the previewHash returned by preview_project_views');
+      receipt.published = await this.materializeProjectViews({
+        projectKey: input.projectKey,
+        worktreePath: input.worktreePath,
+        ...(input.vaultPath ? { vaultPath: input.vaultPath } : {}),
+        previewHash: input.previewHash,
+      });
+    }
+    const after = await this.status(input.projectKey);
+    receipt.after = { ...(receipt.after as object), queues: queueSummary(after) };
+    receipt.domainSync = after.domainSync;
+    receipt.cacheKey = after.cacheKey;
+    return receipt;
+  }
+
+  private async repairFailedJobs(projectKey: string): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE project_knowledge.outbox_jobs job
+       SET state='pending', available_at=now(), locked_at=NULL, lease_owner=NULL,
+           lease_expires_at=NULL, heartbeat_at=NULL
+       FROM project_knowledge.projects project
+       WHERE job.project_id=project.project_id AND project.project_key=$1
+         AND job.state='failed' AND job.attempts < job.max_attempts`,
+      [projectKey],
+    );
+    return result.rowCount ?? 0;
   }
 
   private async status(projectKey: string): Promise<ProjectSyncStatus> {

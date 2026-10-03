@@ -302,6 +302,23 @@ export interface ProjectSyncActionInput {
   timeoutSeconds: number;
   pollSeconds: number;
   localEmbeddingFallback: boolean;
+  repairFailedJobs?: boolean;
+  publish?: boolean;
+  domain?: string;
+}
+
+export interface SyncProjectOnDemandInput {
+  projectKey: string;
+  worktreePath: string;
+  vaultPath?: string;
+  actionId?: string;
+  domain?: string;
+  repairFailedJobs: boolean;
+  localEmbeddingFallback: boolean;
+  timeoutSeconds: number;
+  pollSeconds: number;
+  publish: boolean;
+  previewHash?: string;
 }
 
 export interface FinalizeProjectionInput {
@@ -355,6 +372,7 @@ export interface MaterializeProjectViewsResult {
 export interface ProjectSyncActionRunner {
   finalizeProjection(input: FinalizeProjectionInput): Promise<object>;
   runProjectSyncAction(input: ProjectSyncActionInput): Promise<object>;
+  syncProjectOnDemand(input: SyncProjectOnDemandInput): Promise<object>;
   previewProjectViews(
     input: PreviewProjectViewsInput,
   ): Promise<ProjectViewsPreview>;
