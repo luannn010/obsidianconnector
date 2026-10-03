@@ -64,15 +64,28 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('required_capability text');
     expect(sql).toContain('parent_job_id uuid');
     expect(sql).toContain('outbox_jobs_one_live_key');
-    expect(knowledgeMigrations.at(-1)?.id).toBe(
-      '0008_low_token_change_history_and_lazy_views',
-    );
+    expect(
+      knowledgeMigrations.find(
+        (migration) =>
+          migration.id === '0008_low_token_change_history_and_lazy_views',
+      ),
+    ).toBeDefined();
     expect(sql).toContain('idempotency_key text NOT NULL');
     expect(sql).toContain("'deferred'");
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);
     }
+  });
+
+  it('creates the shared mcp_metrics schema as migration 0010', () => {
+    const migration = knowledgeMigrations.find(
+      (m) => m.id === '0010_mcp_tool_call_metrics',
+    );
+    expect(migration?.sql).toContain(
+      'CREATE TABLE IF NOT EXISTS mcp_metrics.tool_calls (',
+    );
+    expect(knowledgeMigrations.at(-1)?.id).toBe('0010_mcp_tool_call_metrics');
   });
 
   it('skips an applied migration only when its checksum matches', async () => {

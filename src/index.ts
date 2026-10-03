@@ -1,4 +1,5 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createMetricsRecorder } from '@mcp-dashboard/metrics';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
@@ -25,6 +26,15 @@ export async function main(): Promise<void> {
     getConfigPath({ cwd: projectRoot }),
   );
   const runtime = getRuntimeConfig();
+  const metricsUrl =
+    process.env.MCP_METRICS_DATABASE_URL?.trim() || runtime.databaseUrl;
+  const metrics =
+    process.env.MCP_METRICS_DISABLED === 'true'
+      ? undefined
+      : createMetricsRecorder({
+          server: 'obsidian-local',
+          databaseUrl: metricsUrl,
+        });
   const embedder = runtime.embeddingBaseUrl
     ? new OpenAiCompatibleEmbeddingClient(
         runtime.embeddingBaseUrl,
@@ -55,6 +65,7 @@ export async function main(): Promise<void> {
     : undefined;
   const server = createServer(registry, {
     profile: runtime.profile,
+    ...(metrics ? { metrics } : {}),
     ...(database
       ? {
           knowledge: database.store,

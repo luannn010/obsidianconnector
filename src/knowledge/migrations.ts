@@ -1,3 +1,5 @@
+import { metricsMigrationSql } from '@mcp-dashboard/metrics';
+
 export interface KnowledgeMigration {
   id: string;
   sql: string;
@@ -603,5 +605,9 @@ ALTER TABLE project_knowledge.note_projections
   ADD CONSTRAINT note_projections_state_check
   CHECK (state IN ('current','pending','deferred','drifted','missing','failed'));
 `,
+  },
+  {
+    id: '0010_mcp_tool_call_metrics',
+    sql: metricsMigrationSql(),
   },
 ];

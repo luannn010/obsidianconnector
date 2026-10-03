@@ -1,4 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+  instrumentServer,
+  stringField,
+  type MetricsSink,
+} from '@mcp-dashboard/metrics';
 import type { VaultRegistry } from './config/registry.js';
 import { DailyNoteService } from './services/daily-note-service.js';
 import { FilesystemService } from './services/filesystem-service.js';
@@ -23,6 +28,7 @@ export interface ServerOptions {
   profile?: 'standard' | 'admin';
   knowledge?: KnowledgeStore;
   syncActions?: ProjectSyncActionRunner;
+  metrics?: MetricsSink;
 }
 
 export function createServer(
@@ -44,6 +50,11 @@ export function createServer(
     name: 'ObsidianConnector',
     version: '0.1.0',
   });
+  if (options.metrics) {
+    instrumentServer(server, options.metrics, 'obsidian-local', {
+      extractProjectKey: stringField('projectKey'),
+    });
+  }
   if (options.profile === 'standard') {
     if (!options.knowledge) {
       throw new Error(
