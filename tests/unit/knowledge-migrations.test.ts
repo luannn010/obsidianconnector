@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { knowledgeMigrations } from '../../src/knowledge/migrations.js';
 import {
@@ -64,16 +65,40 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('required_capability text');
     expect(sql).toContain('parent_job_id uuid');
     expect(sql).toContain('outbox_jobs_one_live_key');
-    expect(knowledgeMigrations.at(-1)?.id).toBe(
-      '0009_domain_manifest_ignored_paths',
-    );
+    expect(
+      knowledgeMigrations.find(
+        (migration) => migration.id === '0009_domain_manifest_ignored_paths',
+      ),
+    ).toBeDefined();
     expect(sql).toContain('domain_ignored_paths');
+    expect(
+      knowledgeMigrations.find(
+        (migration) =>
+          migration.id === '0008_low_token_change_history_and_lazy_views',
+      ),
+    ).toBeDefined();
     expect(sql).toContain('idempotency_key text NOT NULL');
     expect(sql).toContain("'deferred'");
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);
     }
+  });
+
+  it('creates the shared mcp_metrics schema as migration 0010', () => {
+    const migration = knowledgeMigrations.find(
+      (m) => m.id === '0010_mcp_tool_call_metrics',
+    );
+    expect(migration?.sql).toContain(
+      'CREATE TABLE IF NOT EXISTS mcp_metrics.tool_calls (',
+    );
+    expect(migration).toBeDefined();
+    expect(createHash('sha256').update(migration!.sql).digest('hex')).toBe(
+      'dad4488f112a9664b62b02f8c0a7aabcb3ac68156690b88952b45a876b11e205',
+    );
+    expect(migration!.sql).toContain("date_trunc('hour', started_at, 'UTC')");
+    expect(migration!.sql).toContain('tool_calls_started');
+    expect(knowledgeMigrations.at(-1)?.id).toBe('0010_mcp_tool_call_metrics');
   });
 
   it('skips an applied migration only when its checksum matches', async () => {

@@ -7,6 +7,7 @@ import {
   VaultRegistry,
 } from './config/registry.js';
 import { createServer } from './server.js';
+import { loadMetricsModule } from './metrics-loader.js';
 import { getRuntimeConfig } from './knowledge/config.js';
 import {
   HttpCrossEncoderReranker,
@@ -25,6 +26,16 @@ export async function main(): Promise<void> {
     getConfigPath({ cwd: projectRoot }),
   );
   const runtime = getRuntimeConfig();
+  const metricsUrl =
+    process.env.MCP_METRICS_DATABASE_URL?.trim() || runtime.databaseUrl;
+  const metricsModule =
+    process.env.MCP_METRICS_DISABLED === 'true' ? null : loadMetricsModule();
+  const metrics = metricsModule
+    ? metricsModule.createMetricsRecorder({
+          server: 'obsidian-local',
+          databaseUrl: metricsUrl,
+        })
+    : undefined;
   const embedder = runtime.embeddingBaseUrl
     ? new OpenAiCompatibleEmbeddingClient(
         runtime.embeddingBaseUrl,
@@ -55,6 +66,8 @@ export async function main(): Promise<void> {
     : undefined;
   const server = createServer(registry, {
     profile: runtime.profile,
+    ...(metrics ? { metrics } : {}),
+    metricsModule,
     ...(database
       ? {
           knowledge: database.store,

@@ -26,6 +26,7 @@
     "knowledge:hook": "tsx src/activity-hook.ts"
   },
   "dependencies": {
+    "@mcp-dashboard/metrics": "file:D:/MCP-Dashboard/packages/mcp-metrics",
     "@modelcontextprotocol/sdk": "^1.17.5",
     "canonicalize": "^4.0.0",
     "chokidar": "^5.0.0",
