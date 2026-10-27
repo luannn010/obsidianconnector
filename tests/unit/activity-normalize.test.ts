@@ -13,6 +13,9 @@ describe('agent activity hook normalization', () => {
       ),
     ).toBe('Fix observer database grants');
     expect(deriveTaskName('x'.repeat(200))).toHaveLength(120);
+    expect(
+      deriveTaskName('<pasted_content id="48d9">\nRefactor the admin shell'),
+    ).toBe('Refactor the admin shell');
   });
 
   it('excludes secrets, dependencies, generated output, logs, and temporary files', () => {

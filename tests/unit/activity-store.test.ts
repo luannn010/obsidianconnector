@@ -9,6 +9,10 @@ import type {
   PgPoolLike,
   PgQueryResult,
 } from '../../src/knowledge/pg-store.js';
+import type {
+  KnowledgeWriteResult,
+  WriteProjectKnowledgeInput,
+} from '../../src/knowledge/types.js';
 
 class ActivityClient implements PgClientLike {
   readonly values: unknown[][] = [];
@@ -34,6 +38,39 @@ class ActivityClient implements PgClientLike {
   release() {}
 }
 
+class HandoffClient extends ActivityClient {
+  constructor(
+    private readonly changedFiles: string[],
+    private readonly existingHandoffId?: string,
+  ) {
+    super();
+  }
+  override async query<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(sql: string, values: unknown[] = []): Promise<PgQueryResult<Row>> {
+    if (sql.includes('AS changed_files'))
+      return {
+        rows: [
+          {
+            task_name: 'Observer grants',
+            status: 'completed',
+            branch: 'ptolemy/observer',
+            changed_files: this.changedFiles,
+            changed_count: String(this.changedFiles.length),
+            stale_refs: ['knowledge:item-1:v2'],
+          },
+        ] as unknown as Row[],
+      };
+    if (sql.includes('stable_key=$2'))
+      return {
+        rows: this.existingHandoffId
+          ? ([{ id: this.existingHandoffId }] as unknown as Row[])
+          : [],
+      };
+    return super.query<Row>(sql, values);
+  }
+}
+
 describe('PostgreSQL agent activity handler', () => {
   const resolver: ActivityWorktreeResolver = {
     resolve: async () => ({
@@ -43,6 +80,85 @@ describe('PostgreSQL agent activity handler', () => {
       dirtyHash: null,
     }),
   };
+
+  async function endSession(
+    client: ActivityClient,
+    writes: WriteProjectKnowledgeInput[],
+    write?: () => Promise<never>,
+  ) {
+    const pool: PgPoolLike = {
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    };
+    const handler = new PgActivityHandler(pool, resolver, {
+      writeProjectKnowledge: async (input) => {
+        writes.push(input);
+        if (write) return write();
+        return {} as KnowledgeWriteResult;
+      },
+    });
+    const result = await handler.record({
+      projectKey: 'Test-Project',
+      agent: 'codex',
+      sessionId: 'task-1',
+      lifecycle: 'session_end',
+      cwd: 'C:\\repo',
+      events: [],
+    });
+    await handler.flushHandoffs();
+    return result;
+  }
+
+  it('writes a durable handoff item when a session that changed files ends', async () => {
+    const writes: WriteProjectKnowledgeInput[] = [];
+    await endSession(new HandoffClient(['src/a.ts', 'src/b.ts']), writes);
+    expect(writes).toHaveLength(1);
+    const write = writes[0]!;
+    expect(write).toMatchObject({
+      projectKey: 'Test-Project',
+      actor: 'codex',
+      taskId: 'task-1',
+      reason: 'progress',
+      changes: [
+        {
+          operation: 'create',
+          item: {
+            kind: 'handoff',
+            stableKey: 'handoff:codex:task-1',
+            title: 'Handoff from codex: Observer grants',
+            deliveryStatus: 'completed',
+          },
+        },
+      ],
+    });
+    expect(write.idempotencyKey).toMatch(
+      /^handoff:codex:task-1:[0-9a-f]{16}$/u,
+    );
+    const body = write.changes[0]!.item.bodyMarkdown!;
+    expect(body).toContain('- src/a.ts');
+    expect(body).toContain('ptolemy/observer');
+    expect(body).toContain('knowledge:item-1:v2');
+  });
+
+  it('patches the existing handoff item for the same session', async () => {
+    const writes: WriteProjectKnowledgeInput[] = [];
+    await endSession(new HandoffClient(['src/a.ts'], 'item-9'), writes);
+    expect(writes[0]!.changes[0]).toMatchObject({
+      operation: 'patch',
+      item: { id: 'item-9' },
+    });
+  });
+
+  it('skips the handoff when the session changed no files and survives write failures', async () => {
+    const writes: WriteProjectKnowledgeInput[] = [];
+    await endSession(new HandoffClient([]), writes);
+    expect(writes).toHaveLength(0);
+    await expect(
+      endSession(new HandoffClient(['src/a.ts']), writes, async () => {
+        throw new Error('database unavailable');
+      }),
+    ).resolves.toEqual({ accepted: 0, ignored: 0 });
+  });
 
   it('stores normalized repository paths and ignores excluded activity', async () => {
     const client = new ActivityClient();
