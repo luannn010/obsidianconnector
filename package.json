@@ -23,7 +23,8 @@
     "knowledge:sync-project": "tsx src/sync-project.ts",
     "knowledge:finalize-projection": "tsx src/finalize-projection.ts",
     "knowledge:activity": "tsx src/activity-server.ts",
-    "knowledge:hook": "tsx src/activity-hook.ts"
+    "knowledge:hook": "tsx src/activity-hook.ts",
+    "activity:doctor": "node dist/activity-doctor.js"
   },
   "dependencies": {
     "@mcp-dashboard/metrics": "file:D:/MCP-Dashboard/packages/mcp-metrics",

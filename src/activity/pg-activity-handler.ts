@@ -8,7 +8,11 @@ import {
   type NormalizedActivityEvent,
   type NormalizedHookPayload,
 } from './hook-normalizer.js';
-import type { ActivityHandoff, ActivityRequestHandler } from './http-server.js';
+import type {
+  ActivityHandoff,
+  ActivityRequestHandler,
+  ActivityStatus,
+} from './http-server.js';
 
 export interface ActivityWorktreeFingerprint {
   root: string;
@@ -57,11 +61,47 @@ function normalizedRelativePath(
   return shouldRecordActivityPath(normalized) ? normalized : undefined;
 }
 
+function isoString(value: Date | string | null): string | null {
+  return value === null ? null : new Date(value).toISOString();
+}
+
 export class PgActivityHandler implements ActivityRequestHandler {
   constructor(
     private readonly pool: PgPoolLike,
     private readonly resolver: ActivityWorktreeResolver = defaultResolver,
   ) {}
+
+  private async resolveProject(
+    root: string,
+    projectKey?: string,
+  ): Promise<{ project_id: string; project_key: string } | undefined> {
+    const configured = projectKey?.trim();
+    if (configured)
+      return (
+        await this.pool.query<{ project_id: string; project_key: string }>(
+          `SELECT project_id, project_key
+           FROM project_knowledge.projects WHERE project_key=$1`,
+          [configured],
+        )
+      ).rows[0];
+
+    return (
+      await this.pool.query<{ project_id: string; project_key: string }>(
+        `SELECT project.project_id, project.project_key AS project_key
+         FROM project_knowledge.projects project
+         JOIN project_knowledge.repositories repository
+           ON repository.project_id=project.project_id
+         LEFT JOIN project_knowledge.worktrees worktree
+           ON worktree.repository_id=repository.id AND worktree.registered
+         WHERE lower(repository.root_path)=lower($1)
+            OR lower(worktree.path)=lower($1)
+         ORDER BY CASE WHEN lower(worktree.path)=lower($1) THEN 0 ELSE 1 END,
+                  project.project_key
+         LIMIT 1`,
+        [path.resolve(root)],
+      )
+    ).rows[0];
+  }
 
   async record(
     payload: unknown,
@@ -77,18 +117,15 @@ export class PgActivityHandler implements ActivityRequestHandler {
       !input.cwd.trim()
     )
       throw new Error('Invalid activity payload');
-    const projectKey = input.projectKey?.trim() || 'MC-Platform';
     const fingerprint = await this.resolver.resolve(input.cwd);
+    const project = await this.resolveProject(
+      fingerprint.root,
+      input.projectKey,
+    );
+    if (!project) return { accepted: 0, ignored: (input.events ?? []).length };
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const project = (
-        await client.query<{ project_id: string }>(
-          'SELECT project_id FROM project_knowledge.projects WHERE project_key=$1',
-          [projectKey],
-        )
-      ).rows[0];
-      if (!project) throw new Error('Project is not registered');
       const repository = (
         await client.query<{ id: string }>(
           `SELECT repository.id FROM project_knowledge.repositories repository
@@ -243,11 +280,17 @@ export class PgActivityHandler implements ActivityRequestHandler {
   }
 
   async handoff(input: {
-    projectKey: string;
+    projectKey?: string;
     agent: string;
     cwd: string;
   }): Promise<ActivityHandoff> {
     const fingerprint = await this.resolver.resolve(input.cwd);
+    const projectKey = input.projectKey?.trim();
+    const project = projectKey
+      ? undefined
+      : await this.resolveProject(fingerprint.root);
+    const resolvedProjectKey = projectKey ?? project?.project_key;
+    if (!resolvedProjectKey) return { tasks: [], blockers: [] };
     const otherAgent = input.agent === 'codex' ? 'claude' : 'codex';
     const tasks = await this.pool.query<{
       agent: ActivityAgent;
@@ -289,7 +332,7 @@ export class PgActivityHandler implements ActivityRequestHandler {
          AND t.last_seen_at > now() - interval '7 days'
          AND (t.status='active' OR changed.total > 0)
        ORDER BY t.last_seen_at DESC LIMIT 3`,
-      [input.projectKey, otherAgent, path.resolve(fingerprint.root)],
+      [resolvedProjectKey, otherAgent, path.resolve(fingerprint.root)],
     );
     const blockers = await this.pool.query<{ title: string }>(
       `SELECT i.title FROM project_knowledge.knowledge_items i
@@ -297,7 +340,7 @@ export class PgActivityHandler implements ActivityRequestHandler {
        WHERE p.project_key=$1 AND i.kind='blocker' AND i.superseded_by IS NULL
          AND COALESCE(i.delivery_status,'open') NOT IN ('completed','resolved','cancelled')
        ORDER BY i.updated_at DESC LIMIT 3`,
-      [input.projectKey],
+      [resolvedProjectKey],
     );
     return {
       tasks: tasks.rows.map((row) => {
@@ -321,10 +364,19 @@ export class PgActivityHandler implements ActivityRequestHandler {
   }
 
   async gate(input: {
-    projectKey: string;
+    projectKey?: string;
     agent: string;
     sessionId: string;
+    cwd?: string;
   }): Promise<{ blocked: boolean; refs: string[] }> {
+    const projectKey = input.projectKey?.trim();
+    let resolvedProjectKey = projectKey;
+    if (!resolvedProjectKey && input.cwd) {
+      const fingerprint = await this.resolver.resolve(input.cwd);
+      resolvedProjectKey = (await this.resolveProject(fingerprint.root))
+        ?.project_key;
+    }
+    if (!resolvedProjectKey) return { blocked: false, refs: [] };
     const result = await this.pool.query<{ ref: string }>(
       `SELECT DISTINCT 'knowledge:'||i.id||':v'||i.current_version AS ref
        FROM project_knowledge.projects p
@@ -341,11 +393,48 @@ export class PgActivityHandler implements ActivityRequestHandler {
        WHERE p.project_key=$1 AND t.agent=$2 AND t.external_task_id=$3
          AND COALESCE(df.state,'unverified') <> 'current'
        ORDER BY ref LIMIT 20`,
-      [input.projectKey, input.agent, input.sessionId],
+      [resolvedProjectKey, input.agent, input.sessionId],
     );
     return {
       blocked: result.rows.length > 0,
       refs: result.rows.map((row) => row.ref),
+    };
+  }
+
+  async status(input: {
+    cwd: string;
+    projectKey?: string;
+  }): Promise<ActivityStatus> {
+    const fingerprint = await this.resolver.resolve(input.cwd);
+    const project = await this.resolveProject(
+      fingerprint.root,
+      input.projectKey,
+    );
+    if (!project)
+      return {
+        projectKey: null,
+        lastEventAt: { claude: null, codex: null },
+      };
+    const activity = (
+      await this.pool.query<{
+        claude_last_seen_at: Date | string | null;
+        codex_last_seen_at: Date | string | null;
+      }>(
+        `SELECT
+           max(task.last_seen_at) FILTER (WHERE task.agent='claude') AS claude_last_seen_at,
+           max(task.last_seen_at) FILTER (WHERE task.agent='codex') AS codex_last_seen_at
+         FROM project_knowledge.agent_tasks task
+         JOIN project_knowledge.worktrees worktree ON worktree.id=task.worktree_id
+         WHERE task.project_id=$1 AND lower(worktree.path)=lower($2)`,
+        [project.project_id, path.resolve(fingerprint.root)],
+      )
+    ).rows[0];
+    return {
+      projectKey: project.project_key,
+      lastEventAt: {
+        claude: isoString(activity?.claude_last_seen_at ?? null),
+        codex: isoString(activity?.codex_last_seen_at ?? null),
+      },
     };
   }
 }

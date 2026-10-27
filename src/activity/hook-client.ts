@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -49,18 +49,50 @@ export function formatHandoffContext(
 
 export interface RunActivityHookOptions {
   agent: ActivityAgent;
-  projectKey: string;
+  projectKey?: string;
   baseUrl: string;
   token: string;
   input: unknown;
   fetchImpl?: typeof fetch;
   spool?: (
-    payload: NormalizedHookPayload & { projectKey: string },
+    payload: NormalizedHookPayload & { projectKey?: string },
   ) => Promise<void>;
 }
 
+export async function resolveActivityProjectKey(
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | undefined> {
+  const configured = env.PROJECT_KNOWLEDGE_PROJECT_KEY?.trim();
+  if (configured) return configured;
+
+  let current = path.resolve(cwd);
+  while (true) {
+    try {
+      await stat(path.join(current, '.git'));
+      try {
+        const parsed = JSON.parse(
+          await readFile(
+            path.join(current, '.obsidian-local', 'config.json'),
+            'utf8',
+          ),
+        ) as { projectKey?: unknown };
+        return typeof parsed.projectKey === 'string' && parsed.projectKey.trim()
+          ? parsed.projectKey.trim()
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return undefined;
+      current = parent;
+    }
+  }
+}
+
 export async function appendActivitySpool(
-  payload: NormalizedHookPayload & { projectKey: string },
+  payload: NormalizedHookPayload & { projectKey?: string },
   spoolPath = process.env.PROJECT_KNOWLEDGE_ACTIVITY_SPOOL?.trim() ||
     path.join(
       os.homedir(),
@@ -105,7 +137,7 @@ async function fetchHandoffContext(
         method: 'POST',
         headers,
         body: JSON.stringify({
-          projectKey: options.projectKey,
+          ...(options.projectKey ? { projectKey: options.projectKey } : {}),
           agent: options.agent,
           cwd,
         }),
@@ -129,7 +161,7 @@ export async function runActivityHook(
   const fetchImpl = options.fetchImpl ?? fetch;
   const spool = options.spool ?? appendActivitySpool;
   const normalized = {
-    projectKey: options.projectKey,
+    ...(options.projectKey ? { projectKey: options.projectKey } : {}),
     ...normalizeHookPayload(options.agent, options.input),
   };
   const headers = {
@@ -164,8 +196,10 @@ export async function runActivityHook(
   if (normalized.lifecycle !== 'stop' || normalized.stopHookActive)
     return { blocked: false, refs: [], spooled };
   try {
+    const query = new URLSearchParams({ cwd: normalized.cwd });
+    if (options.projectKey) query.set('projectKey', options.projectKey);
     const response = await fetchImpl(
-      `${options.baseUrl.replace(/\/$/u, '')}/v1/tasks/${options.agent}/${encodeURIComponent(normalized.sessionId)}/gate?projectKey=${encodeURIComponent(options.projectKey)}`,
+      `${options.baseUrl.replace(/\/$/u, '')}/v1/tasks/${options.agent}/${encodeURIComponent(normalized.sessionId)}/gate?${query.toString()}`,
       { headers, signal: AbortSignal.timeout(1500) },
     );
     if (response.status !== 409) return { blocked: false, refs: [], spooled };

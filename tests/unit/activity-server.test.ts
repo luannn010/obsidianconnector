@@ -70,16 +70,50 @@ describe('activity loopback HTTP server', () => {
         refs: ['knowledge:item-1:v2'],
       }),
     });
-    const response = await fetch(
-      `${baseUrl}/v1/tasks/codex/task-1/gate?projectKey=MC-Platform`,
-      { headers: { authorization: 'Bearer local-token' } },
-    );
+    const response = await fetch(`${baseUrl}/v1/tasks/codex/task-1/gate`, {
+      headers: { authorization: 'Bearer local-token' },
+    });
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
       blocked: true,
       code: 'DOCS_STALE',
       refs: ['knowledge:item-1:v2'],
     });
+  });
+
+  it('returns project resolution and last activity from the status route', async () => {
+    const requests: unknown[] = [];
+    const baseUrl = await start({
+      record: async () => ({ accepted: 0, ignored: 0 }),
+      gate: async (input) => {
+        requests.push(input);
+        return { blocked: false, refs: [] };
+      },
+      status: async (input) => {
+        requests.push(input);
+        return {
+          projectKey: 'Test-Project',
+          lastEventAt: {
+            claude: '2026-10-27T01:00:00.000Z',
+            codex: null,
+          },
+        };
+      },
+    });
+    const response = await fetch(
+      `${baseUrl}/v1/status?cwd=${encodeURIComponent('C:\\repo')}`,
+      { headers: { authorization: 'Bearer local-token' } },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      projectKey: 'Test-Project',
+      lastEventAt: {
+        claude: '2026-10-27T01:00:00.000Z',
+        codex: null,
+      },
+    });
+    expect(requests).toEqual([{ cwd: 'C:\\repo' }]);
   });
   it('returns the cross-agent handoff for a session start', async () => {
     const requests: unknown[] = [];
