@@ -3,6 +3,54 @@ export type SearchMode = 'auto' | 'exact' | 'structured' | 'hybrid';
 export type ExpansionView =
   'full' | 'parent' | 'neighbors' | 'relations' | 'examples' | 'schema';
 
+export const KNOWLEDGE_KINDS = [
+  'access_control',
+  'active_work',
+  'api_contract',
+  'api_endpoint',
+  'api_reference',
+  'architecture',
+  'architecture_boundary',
+  'blocker',
+  'change',
+  'change_log',
+  'change_note',
+  'change_summary',
+  'changelog',
+  'completed',
+  'completed_work',
+  'constraint',
+  'convention',
+  'database_dictionary',
+  'database_migration',
+  'database_reference',
+  'database_schema',
+  'database_table',
+  'decision',
+  'delivery',
+  'documentation',
+  'feature',
+  'gotcha',
+  'handoff',
+  'implementation_note',
+  'operational_runbook',
+  'permission',
+  'permissions',
+  'project_note',
+  'retired_note',
+  'risk',
+  'risk_assessment',
+  'runbook',
+  'service',
+  'session_memory',
+  'symbol',
+  'system_design',
+  'work_item',
+] as const;
+
+export type KnowledgeKind =
+  (typeof KNOWLEDGE_KINDS)[number] | `other:${string}`;
+
 export interface ContextHit {
   ref: string;
   kind: string;
@@ -20,6 +68,8 @@ export interface ContextHit {
   lines?: { start: number; end: number };
   documentationFreshness?:
     'current' | 'possibly_stale' | 'stale' | 'missing' | 'unverified';
+  claimedBy?: 'codex' | 'claude';
+  claimExpiresAt?: string;
 }
 
 export interface ProjectSnapshotInput {

@@ -6,7 +6,9 @@ export type KnowledgeErrorCode =
   | 'PROJECTION_DRIFT'
   | 'DOCS_STALE'
   | 'CURSOR_EXPIRED'
-  | 'BUDGET_TOO_SMALL';
+  | 'BUDGET_TOO_SMALL'
+  | 'UNKNOWN_KIND'
+  | 'CLAIM_CONFLICT';
 
 export class KnowledgeError extends Error {
   constructor(

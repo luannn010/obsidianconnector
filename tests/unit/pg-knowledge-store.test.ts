@@ -30,6 +30,54 @@ class FakeClient {
   }
 }
 
+class KnowledgeWriteClient extends FakeClient {
+  readonly queries: Array<{ sql: string; values?: unknown[] }> = [];
+
+  constructor(private readonly existing?: Record<string, unknown>) {
+    super();
+  }
+
+  override async query<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(sql: string, values?: unknown[]): Promise<PgQueryResult<Row>> {
+    this.statements.push(sql);
+    this.queries.push({ sql, values });
+    if (
+      sql.includes('FROM project_knowledge.projects') &&
+      sql.includes('FOR UPDATE')
+    )
+      return {
+        rows: [{ project_id: 'project-1', db_revision: 3 }] as unknown as Row[],
+      };
+    if (sql.includes('FOR UPDATE OF i'))
+      return {
+        rows: this.existing ? ([this.existing] as unknown as Row[]) : [],
+      };
+    if (sql.includes('INSERT INTO project_knowledge.work_items'))
+      return { rows: [{ id: 'work-item-1' }] as unknown as Row[] };
+    if (sql.includes('INSERT INTO project_knowledge.knowledge_versions'))
+      return { rows: [{ id: 'version-1' }] as unknown as Row[] };
+    return { rows: [] };
+  }
+}
+
+function existingWorkItem(properties: Record<string, unknown>) {
+  return {
+    id: 'item-1',
+    stable_key: 'work_item:claimable',
+    kind: 'work_item',
+    title: 'Claimable work',
+    current_version: 1,
+    delivery_status: 'active',
+    verification_status: 'unverified',
+    domain: null,
+    service: null,
+    body_markdown: 'Coordinate this work.',
+    properties,
+    canonical_hash: 'current-hash',
+  };
+}
+
 function searchPool(count: number): PgPoolLike {
   const chunks = Array.from({ length: count }, (_, index) => ({
     id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
@@ -205,6 +253,273 @@ describe('PostgreSQL knowledge store', () => {
     } satisfies Partial<KnowledgeError>);
   });
 
+  it('rejects an unknown knowledge kind before opening a transaction', async () => {
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('should not connect');
+      },
+      query: async () => ({ rows: [] }),
+    };
+
+    await expect(
+      new PgKnowledgeStore(pool).writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        changes: [
+          {
+            operation: 'create',
+            item: { kind: 'surprise', title: 'Unknown kind' },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      code: 'UNKNOWN_KIND',
+      retryable: false,
+      details: {
+        allowedKinds: expect.arrayContaining(['decision', 'work_item']),
+      },
+    } satisfies Partial<KnowledgeError>);
+  });
+
+  it('normalizes knowledge kind case and surrounding whitespace on write', async () => {
+    const client = new KnowledgeWriteClient();
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+
+    await store.writeProjectKnowledge({
+      projectKey: 'MC-Platform',
+      actor: 'codex',
+      changes: [
+        {
+          operation: 'create',
+          item: { kind: '  DeCiSiOn  ', title: 'Normalized kind' },
+        },
+      ],
+    });
+
+    const insert = client.queries.find(({ sql }) =>
+      sql.includes('INSERT INTO project_knowledge.knowledge_items'),
+    );
+    expect(insert?.values?.[2]).toBe('decision');
+  });
+
+  it('persists a normalized kind when patching an existing item', async () => {
+    const client = new KnowledgeWriteClient({
+      id: 'item-1',
+      stable_key: 'decision:legacy',
+      kind: '  DeCiSiOn  ',
+      title: 'Legacy decision',
+      current_version: 1,
+      delivery_status: 'active',
+      verification_status: 'unverified',
+      domain: null,
+      service: null,
+      body_markdown: 'Legacy body.',
+      properties: {},
+      canonical_hash: 'legacy-hash',
+    });
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+
+    await store.writeProjectKnowledge({
+      projectKey: 'MC-Platform',
+      actor: 'codex',
+      changes: [
+        {
+          operation: 'patch',
+          item: { id: 'item-1', bodyMarkdown: 'Normalized body.' },
+        },
+      ],
+    });
+
+    const update = client.queries.find(({ sql }) =>
+      sql.includes('UPDATE project_knowledge.knowledge_items SET kind='),
+    );
+    expect(update?.values?.[2]).toBe('decision');
+  });
+
+  it('keeps patching legacy items whose stored kind predates the vocabulary', async () => {
+    const client = new KnowledgeWriteClient({
+      id: 'item-2',
+      stable_key: 'note:legacy',
+      kind: 'Implementation-Note',
+      title: 'Legacy note',
+      current_version: 1,
+      delivery_status: null,
+      verification_status: 'unverified',
+      domain: null,
+      service: null,
+      body_markdown: 'Legacy body.',
+      properties: {},
+      canonical_hash: 'legacy-hash',
+    });
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+
+    await store.writeProjectKnowledge({
+      projectKey: 'MC-Platform',
+      actor: 'claude',
+      changes: [
+        {
+          operation: 'patch',
+          item: { id: 'item-2', bodyMarkdown: 'Updated body.' },
+        },
+      ],
+    });
+
+    const update = client.queries.find(({ sql }) =>
+      sql.includes('UPDATE project_knowledge.knowledge_items SET kind='),
+    );
+    expect(update?.values?.[2]).toBe('implementation_note');
+  });
+
+  it('accepts a lowercase other slug as a knowledge kind', async () => {
+    const client = new KnowledgeWriteClient();
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+
+    await store.writeProjectKnowledge({
+      projectKey: 'MC-Platform',
+      actor: 'codex',
+      changes: [
+        {
+          operation: 'create',
+          item: { kind: '  OTHER:release-note  ', title: 'Release note' },
+        },
+      ],
+    });
+
+    const insert = client.queries.find(({ sql }) =>
+      sql.includes('INSERT INTO project_knowledge.knowledge_items'),
+    );
+    expect(insert?.values?.[2]).toBe('other:release-note');
+  });
+
+  it('rejects a work item claim held by another agent', async () => {
+    const claimExpiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const client = new KnowledgeWriteClient(
+      existingWorkItem({ claimedBy: 'claude', claimExpiresAt }),
+    );
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+
+    await expect(
+      store.writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        changes: [
+          {
+            operation: 'patch',
+            item: {
+              id: 'item-1',
+              properties: {
+                claimedBy: 'codex',
+                claimExpiresAt: new Date(
+                  Date.now() + 2 * 60 * 60_000,
+                ).toISOString(),
+              },
+            },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      code: 'CLAIM_CONFLICT',
+      retryable: false,
+      details: { claimedBy: 'claude', claimExpiresAt },
+    } satisfies Partial<KnowledgeError>);
+    expect(client.statements.at(-1)).toBe('ROLLBACK');
+  });
+
+  it('allows the same agent to renew a work item claim', async () => {
+    const client = new KnowledgeWriteClient(
+      existingWorkItem({
+        claimedBy: 'codex',
+        claimExpiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      }),
+    );
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+    const renewedUntil = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+
+    await expect(
+      store.writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        changes: [
+          {
+            operation: 'patch',
+            item: {
+              id: 'item-1',
+              properties: {
+                claimedBy: 'codex',
+                claimExpiresAt: renewedUntil,
+              },
+            },
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ summary: { updated: 1 } });
+    const version = client.queries.find(({ sql }) =>
+      sql.includes('INSERT INTO project_knowledge.knowledge_versions'),
+    );
+    expect(version?.values?.[4]).toMatchObject({
+      claimedBy: 'codex',
+      claimExpiresAt: renewedUntil,
+    });
+  });
+
+  it('allows an expired work item claim to be taken by another agent', async () => {
+    const client = new KnowledgeWriteClient(
+      existingWorkItem({
+        claimedBy: 'claude',
+        claimExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
+    );
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+    const claimedUntil = new Date(Date.now() + 60 * 60_000).toISOString();
+
+    await expect(
+      store.writeProjectKnowledge({
+        projectKey: 'MC-Platform',
+        actor: 'codex',
+        changes: [
+          {
+            operation: 'patch',
+            item: {
+              id: 'item-1',
+              properties: {
+                claimedBy: 'codex',
+                claimExpiresAt: claimedUntil,
+              },
+            },
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ summary: { updated: 1 } });
+    const version = client.queries.find(({ sql }) =>
+      sql.includes('INSERT INTO project_knowledge.knowledge_versions'),
+    );
+    expect(version?.values?.[4]).toMatchObject({
+      claimedBy: 'codex',
+      claimExpiresAt: claimedUntil,
+    });
+  });
+
   it('rejects writes with create/update change missing kind', async () => {
     const clientRows = [{ project_id: 'project-1', db_revision: 1 }];
     const client: PgClientLike = {
@@ -268,6 +583,66 @@ describe('PostgreSQL knowledge store', () => {
       itemVersion: 7,
       stableKey: 'architecture:authentication',
       documentationFreshness: 'stale',
+    });
+  });
+
+  it('prioritizes catch-up kinds and exposes active work item claims', async () => {
+    const claimExpiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const kinds = ['blocker', 'decision', 'work_item', 'gotcha', 'handoff'];
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('not used by recall');
+      },
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('FROM project_knowledge.projects'))
+          return {
+            rows: [
+              { project_id: 'project-1', db_revision: 4 },
+            ] as unknown as Row[],
+          };
+        return {
+          rows: kinds.map((kind, index) => ({
+            id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+            kind,
+            title: kind,
+            content: `${kind} content`,
+            content_hash: `${kind}-hash`,
+            item_id: `item-${index}`,
+            item_version: 1,
+            stable_key: `${kind}:${index}`,
+            metadata:
+              kind === 'work_item'
+                ? {
+                    citation: kind,
+                    claimedBy: 'codex',
+                    claimExpiresAt,
+                  }
+                : { citation: kind },
+            head_commit: null,
+            db_revision: 4,
+          })) as unknown as Row[],
+        };
+      },
+    };
+
+    const result = await new PgKnowledgeStore(pool).recallProjectKnowledge({
+      projectKey: 'MC-Platform',
+      intent: 'catch_up',
+      maxTokens: 2000,
+    });
+
+    expect(result.results.map(({ kind }) => kind)).toEqual([
+      'handoff',
+      'gotcha',
+      'decision',
+      'blocker',
+      'work_item',
+    ]);
+    expect(result.results.at(-1)).toMatchObject({
+      claimedBy: 'codex',
+      claimExpiresAt,
     });
   });
 

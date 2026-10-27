@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type {
-  KnowledgeStore,
-  ProjectSyncActionRunner,
+import {
+  KNOWLEDGE_KINDS,
+  type KnowledgeStore,
+  type ProjectSyncActionRunner,
 } from '../knowledge/types.js';
 import { runTool } from './tool-utils.js';
 
@@ -154,6 +155,7 @@ export function registerKnowledgeTools(
   server.registerTool(
     'write_project_knowledge',
     {
+      description: `Write versioned project knowledge. Kind is case-normalized and must be one of: ${KNOWLEDGE_KINDS.join(', ')}, or other:<slug> where slug uses lowercase letters, digits, and hyphens.`,
       inputSchema: {
         projectKey,
         actor: z.string(),

@@ -8,24 +8,25 @@ import {
   packWithinTokenBudget,
   type TokenBudget,
 } from './token-budget.js';
-import type {
-  ContextHit,
-  ContextResults,
-  Freshness,
-  ExpandProjectContextInput,
-  KnowledgeChange,
-  KnowledgeStore,
-  KnowledgeRecallResult,
-  KnowledgeWriteResult,
-  ProjectSnapshot,
-  ProjectSnapshotInput,
-  RecallProjectKnowledgeInput,
-  ProjectSyncStatus,
-  SyncStatusSummary,
-  SyncSuggestedAction,
-  SearchProjectContextInput,
-  SyncStatusInput,
-  WriteProjectKnowledgeInput,
+import {
+  KNOWLEDGE_KINDS,
+  type ContextHit,
+  type ContextResults,
+  type Freshness,
+  type ExpandProjectContextInput,
+  type KnowledgeChange,
+  type KnowledgeStore,
+  type KnowledgeRecallResult,
+  type KnowledgeWriteResult,
+  type ProjectSnapshot,
+  type ProjectSnapshotInput,
+  type RecallProjectKnowledgeInput,
+  type ProjectSyncStatus,
+  type SyncStatusSummary,
+  type SyncSuggestedAction,
+  type SearchProjectContextInput,
+  type SyncStatusInput,
+  type WriteProjectKnowledgeInput,
 } from './types.js';
 
 export interface PgQueryResult<
@@ -114,6 +115,49 @@ const evidenceRequiredKinds = new Set([
   'operational_runbook',
   'work_item',
 ]);
+const allowedKnowledgeKinds = new Set<string>(KNOWLEDGE_KINDS);
+const otherKnowledgeKindPattern = /^other:[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+const allowedKnowledgeKindDetails = [...KNOWLEDGE_KINDS, 'other:<slug>'];
+
+function normalizeKnowledgeKind(kind: string): string {
+  const normalized = kind.trim().toLowerCase();
+  return normalized.startsWith('other:')
+    ? normalized
+    : normalized.replace(/[\s-]+/gu, '_');
+}
+
+function isAllowedKnowledgeKind(kind: string): boolean {
+  return (
+    allowedKnowledgeKinds.has(kind) || otherKnowledgeKindPattern.test(kind)
+  );
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(
+      value,
+    ) &&
+    Number.isFinite(Date.parse(value))
+  );
+}
+
+function activeClaim(properties: Record<string, unknown>):
+  | {
+      claimedBy: 'codex' | 'claude';
+      claimExpiresAt: string;
+    }
+  | undefined {
+  const claimedBy = properties.claimedBy;
+  const claimExpiresAt = properties.claimExpiresAt;
+  if (
+    (claimedBy !== 'codex' && claimedBy !== 'claude') ||
+    !isIsoTimestamp(claimExpiresAt) ||
+    Date.parse(claimExpiresAt) <= Date.now()
+  )
+    return undefined;
+  return { claimedBy, claimExpiresAt };
+}
 
 export interface PgKnowledgeStoreOptions {
   embedder?: EmbeddingProvider;
@@ -296,6 +340,7 @@ function toActionId(
 function hitFromChunk(row: ChunkRow, full = false): ContextHit {
   const metadata = row.metadata ?? {};
   const content = full ? row.content : row.content.slice(0, 900);
+  const claim = activeClaim(metadata);
   return {
     ref: `chunk:${row.id}`,
     kind: row.kind,
@@ -317,6 +362,7 @@ function hitFromChunk(row: ChunkRow, full = false): ContextHit {
     ...(row.documentation_freshness
       ? { documentationFreshness: row.documentation_freshness }
       : {}),
+    ...(claim ?? {}),
   };
 }
 
@@ -803,12 +849,30 @@ export class PgKnowledgeStore implements KnowledgeStore {
       projectKey: input.projectKey,
       query,
       mode: input.intent === 'verify' ? 'exact' : 'auto',
-      limit: 12,
+      limit: input.intent === 'catch_up' ? 30 : 12,
       maxTokens: Math.min(4000, input.maxTokens * 3),
       ...(snapshotId ? { snapshotId } : {}),
       ...(worktreeId ? { worktreeId } : {}),
       ...(input.filters ? { filters: input.filters } : {}),
     });
+    const catchUpPriority = new Map([
+      ['handoff', 0],
+      ['gotcha', 1],
+      ['decision', 2],
+    ]);
+    const rankedResults = (
+      input.intent === 'catch_up'
+        ? recalled.results
+            .map((hit, index) => ({ hit, index }))
+            .sort(
+              (left, right) =>
+                (catchUpPriority.get(left.hit.kind) ?? 3) -
+                  (catchUpPriority.get(right.hit.kind) ?? 3) ||
+                left.index - right.index,
+            )
+            .map(({ hit }) => hit)
+        : recalled.results
+    ).slice(0, 12);
     const stateHash = canonicalHash({
       projectKey: input.projectKey,
       intent: input.intent,
@@ -817,11 +881,13 @@ export class PgKnowledgeStore implements KnowledgeStore {
       gitRevision: recalled.gitRevision,
       dbRevision: recalled.dbRevision,
       warnings: recalled.warnings ?? [],
-      results: recalled.results.map((hit) => ({
+      results: rankedResults.map((hit) => ({
         ref: hit.ref,
         itemId: hit.itemId ?? null,
         itemVersion: hit.itemVersion ?? null,
         contentHash: hit.contentHash,
+        claimedBy: hit.claimedBy ?? null,
+        claimExpiresAt: hit.claimExpiresAt ?? null,
       })),
     });
     if (input.knownStateHash === stateHash) {
@@ -831,7 +897,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
         freshness: recalled.freshness,
         gitRevision: recalled.gitRevision,
         dbRevision: recalled.dbRevision,
-        unchangedResults: recalled.results.length,
+        unchangedResults: rankedResults.length,
         ...(snapshotId ? { snapshotId } : {}),
         ...(recalled.warnings ? { warnings: recalled.warnings } : {}),
       });
@@ -842,7 +908,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
       };
     }
     const known = input.knownItemHashes ?? {};
-    const results = recalled.results.filter(
+    const results = rankedResults.filter(
       (hit) => !hit.itemId || known[hit.itemId] !== hit.contentHash,
     );
     const packed = packWithinTokenBudget(results, input.maxTokens, {
@@ -851,7 +917,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
       freshness: recalled.freshness,
       gitRevision: recalled.gitRevision,
       dbRevision: recalled.dbRevision,
-      unchangedResults: recalled.results.length - results.length,
+      unchangedResults: rankedResults.length - results.length,
       ...(snapshotId ? { snapshotId } : {}),
       ...(recalled.warnings ? { warnings: recalled.warnings } : {}),
     });
@@ -891,6 +957,17 @@ export class PgKnowledgeStore implements KnowledgeStore {
           false,
           { index },
         );
+      }
+      if (candidate.item.kind !== undefined) {
+        const kind = normalizeKnowledgeKind(candidate.item.kind);
+        if (!isAllowedKnowledgeKind(kind))
+          throw new KnowledgeError(
+            'UNKNOWN_KIND',
+            `Unknown knowledge kind: ${candidate.item.kind}`,
+            false,
+            { allowedKinds: allowedKnowledgeKindDetails },
+          );
+        return { ...candidate, item: { ...candidate.item, kind } };
       }
       return candidate;
     });
@@ -1128,7 +1205,9 @@ export class PgKnowledgeStore implements KnowledgeStore {
     }
     const itemId = existing?.id ?? change.item.id ?? randomUUID();
     const version = (existing?.current_version ?? 0) + 1;
-    const kind = change.item.kind ?? existing?.kind;
+    const kind = normalizeKnowledgeKind(
+      change.item.kind ?? existing?.kind ?? '',
+    );
     if (!kind) {
       throw new KnowledgeError(
         'VERSION_CONFLICT',
@@ -1136,6 +1215,13 @@ export class PgKnowledgeStore implements KnowledgeStore {
         false,
       );
     }
+    if (change.item.kind !== undefined && !isAllowedKnowledgeKind(kind))
+      throw new KnowledgeError(
+        'UNKNOWN_KIND',
+        `Unknown knowledge kind: ${kind}`,
+        false,
+        { allowedKinds: allowedKnowledgeKindDetails },
+      );
     if (
       existing &&
       change.expectedHash !== undefined &&
@@ -1169,6 +1255,48 @@ export class PgKnowledgeStore implements KnowledgeStore {
       ...(existing?.properties ?? {}),
       ...(change.item.properties ?? {}),
     };
+    const setsClaimedBy = Object.prototype.hasOwnProperty.call(
+      change.item.properties ?? {},
+      'claimedBy',
+    );
+    if (
+      (kind === 'work_item' || existing?.kind === 'work_item') &&
+      (change.operation === 'create' || change.operation === 'patch') &&
+      setsClaimedBy
+    ) {
+      const requestedClaimant = change.item.properties?.claimedBy;
+      if (
+        requestedClaimant !== null &&
+        requestedClaimant !== 'codex' &&
+        requestedClaimant !== 'claude'
+      )
+        throw new KnowledgeError(
+          'VERSION_CONFLICT',
+          'Work item claimedBy must be codex, claude, or null',
+          false,
+        );
+      if (
+        requestedClaimant !== null &&
+        !isIsoTimestamp(properties.claimExpiresAt)
+      )
+        throw new KnowledgeError(
+          'VERSION_CONFLICT',
+          'A claimed work item requires an ISO claimExpiresAt value',
+          false,
+        );
+      const currentClaim = activeClaim(existing?.properties ?? {});
+      if (
+        currentClaim &&
+        requestedClaimant !== null &&
+        requestedClaimant !== currentClaim.claimedBy
+      )
+        throw new KnowledgeError(
+          'CLAIM_CONFLICT',
+          'Work item is actively claimed by another agent',
+          false,
+          currentClaim,
+        );
+    }
     const record = {
       kind,
       title,
@@ -1255,12 +1383,13 @@ export class PgKnowledgeStore implements KnowledgeStore {
       );
     } else {
       await client.query(
-        `UPDATE project_knowledge.knowledge_items SET title=$3,current_version=$4,
-        delivery_status=$5,verification_status=$6,domain=$7,service=$8,updated_at=now()
+        `UPDATE project_knowledge.knowledge_items SET kind=$3,title=$4,current_version=$5,
+        delivery_status=$6,verification_status=$7,domain=$8,service=$9,updated_at=now()
         WHERE project_id=$1 AND id=$2`,
         [
           projectId,
           itemId,
+          record.kind,
           title,
           version,
           record.deliveryStatus,
@@ -1437,7 +1566,11 @@ export class PgKnowledgeStore implements KnowledgeStore {
         `${title}\n\n${bodyMarkdown}`,
         hash,
         countSerializedTokens(`${title}\n\n${bodyMarkdown}`),
-        { citation: `knowledge:${itemId}:v${version}`, itemVersion: version },
+        {
+          citation: `knowledge:${itemId}:v${version}`,
+          itemVersion: version,
+          ...(record.kind === 'work_item' ? activeClaim(properties) : {}),
+        },
       ],
     );
     await client.query(
