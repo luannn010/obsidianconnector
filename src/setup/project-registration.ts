@@ -54,8 +54,11 @@ export async function registerProjectWorktree(
         [input.projectKey],
       )
     ).rows[0];
+    // Projects registered before vault tracking have an empty binding; adopt it.
+    const unbound = existing?.vault_name === '';
     if (
       existing &&
+      !unbound &&
       (existing.vault_name !== input.vaultName ||
         existing.vault_relative_path !== input.vaultRelativePath)
     ) {
@@ -81,9 +84,14 @@ export async function registerProjectWorktree(
       ).rows[0]!.project_id;
     if (existing) {
       await client.query(
-        `UPDATE project_knowledge.projects SET name=$2,updated_at=now()
+        `UPDATE project_knowledge.projects
+         SET name=$2,
+             vault_name=CASE WHEN vault_name='' THEN $3 ELSE vault_name END,
+             vault_relative_path=CASE WHEN vault_name='' THEN $4
+                                      ELSE vault_relative_path END,
+             updated_at=now()
          WHERE project_id=$1`,
-        [projectId, input.name],
+        [projectId, input.name, input.vaultName, input.vaultRelativePath],
       );
     }
 

@@ -38,7 +38,7 @@ function Save-EnvironmentValue([string]$Path, [string]$Key, [string]$Value) {
   [IO.Directory]::CreateDirectory($directory) | Out-Null
   $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
   $lines = foreach ($entry in $values.GetEnumerator()) { "$($entry.Key)=$($entry.Value)" }
-  Set-Content -LiteralPath $temporary -Encoding utf8NoBOM -Value $lines
+  [IO.File]::WriteAllLines($temporary, [string[]]$lines, (New-Object Text.UTF8Encoding($false)))
   Move-Item -LiteralPath $temporary -Destination $Path -Force
 }
 
@@ -124,11 +124,12 @@ try {
 
   $runtimeFile = Join-Path ([IO.Path]::GetTempPath()) "project-setup-$([guid]::NewGuid().ToString('N')).env"
   try {
-    Set-Content -LiteralPath $runtimeFile -Encoding utf8NoBOM -Value @(
+    # Windows PowerShell 5.1 has no utf8NoBOM encoding; write BOM-less UTF-8 directly.
+    [IO.File]::WriteAllLines($runtimeFile, [string[]]@(
       "PROJECT_KNOWLEDGE_DATABASE_URL=$DatabaseUrl",
       'PROJECT_KNOWLEDGE_DB_POOL_MAX=2',
       'PROJECT_KNOWLEDGE_STATEMENT_TIMEOUT_MS=30000'
-    )
+    ), (New-Object Text.UTF8Encoding($false)))
     $safeKey = ($ProjectKey.ToLowerInvariant() -replace '[^a-z0-9_-]', '-')
     $env:PROJECT_KNOWLEDGE_WORKER_IMAGE = $Image
     $env:PROJECT_KNOWLEDGE_WORKER_RELEASE = ($Image -split '@')[-1]
@@ -137,8 +138,15 @@ try {
     $env:OBSIDIAN_VAULT_ROOT = [IO.Path]::GetFullPath($VaultRoot)
     $env:PROJECT_KNOWLEDGE_WINDOWS_CAPABILITIES = 'source-sync,publish'
     $env:PROJECT_KNOWLEDGE_SOURCE_WORKTREE_ID = $setup.worktreeId
-    $composeOutput = & docker.exe compose -p "project-knowledge-$safeKey" -f (Join-Path $repoRoot 'services\queue-worker\compose.windows.yaml') up -d 2>&1
-    if ($LASTEXITCODE -ne 0) { throw 'Windows source worker did not start' }
+    # Compose reports progress on stderr, which Windows PowerShell 5.1 turns into terminating errors under Stop.
+    $ErrorActionPreference = 'Continue'
+    try {
+      $composeOutput = & docker.exe compose -p "project-knowledge-$safeKey" -f (Join-Path $repoRoot 'services\queue-worker\compose.windows.yaml') up -d 2>&1
+    } finally { $ErrorActionPreference = 'Stop' }
+    if ($LASTEXITCODE -ne 0) {
+      foreach ($line in $composeOutput) { Write-Warning ([string]$line) }
+      throw 'Windows source worker did not start'
+    }
     foreach ($line in $composeOutput) { Write-Verbose $line }
     if (-not $Wait) {
       [ordered]@{ state = 'queued'; setup = $setup; jobId = $setup.jobId } | ConvertTo-Json -Depth 8 -Compress
