@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { WorkerProject } from '../../src/worker/knowledge-worker.js';
 import {
   deactivateMissingWorktrees,
+  ProjectNotReconciledError,
   synchronizeProjectWorktrees,
 } from '../../src/worker/worktree-lifecycle.js';
 
@@ -72,6 +73,43 @@ describe('registered worktree lifecycle', () => {
         snapshotId: 'snapshot-feature',
         indexedFiles: 3,
       },
+    ]);
+  });
+
+  it('bootstraps a new project by reconciling the primary repository first', async () => {
+    const calls: string[] = [];
+    let reconciledPrimary = false;
+    const featurePath = path.resolve('C:/repo/.worktrees/feature-a');
+    const worker = {
+      reconcile: async (input: WorkerProject) => {
+        calls.push(`reconcile:${input.repositoryPath}`);
+        if (input.repositoryPath === project.repositoryPath)
+          reconciledPrimary = true;
+        return { changed: true, snapshotId: 'snapshot', indexedFiles: 1 };
+      },
+      syncWorktrees: async () => {
+        calls.push('syncWorktrees');
+        if (!reconciledPrimary) throw new ProjectNotReconciledError();
+        return {
+          registered: 2,
+          unmanaged: 0,
+          removed: 0,
+          paths: [project.repositoryPath, featurePath],
+        };
+      },
+    };
+
+    const result = await synchronizeProjectWorktrees(worker, project);
+
+    expect(calls).toEqual([
+      'syncWorktrees',
+      `reconcile:${project.repositoryPath}`,
+      'syncWorktrees',
+      `reconcile:${featurePath}`,
+    ]);
+    expect(result.indexedWorktrees.map((item) => item.worktreePath)).toEqual([
+      project.repositoryPath,
+      featurePath,
     ]);
   });
 

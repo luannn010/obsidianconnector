@@ -33,7 +33,10 @@ import { parseDatabaseMigration } from './database-parser.js';
 import { parseApiContracts } from './api-contract-parser.js';
 import { parseSequenceFlows } from './sequence-parser.js';
 import { buildDomainSyncReport, importDomainManifest } from './domain-audit.js';
-import { deactivateMissingWorktrees } from './worktree-lifecycle.js';
+import {
+  deactivateMissingWorktrees,
+  ProjectNotReconciledError,
+} from './worktree-lifecycle.js';
 import { EmbeddingQueueProcessor } from './embedding-queue-processor.js';
 
 export interface WorkerProject {
@@ -536,10 +539,7 @@ export class KnowledgeWorker {
         [project.projectKey, [...registeredPaths]],
       )
     ).rows[0];
-    if (!projectRow)
-      throw new Error(
-        'Project must be reconciled before worktrees are synchronized',
-      );
+    if (!projectRow) throw new ProjectNotReconciledError();
     for (const item of registered) {
       const fingerprint = await fingerprintWorktree(item.path);
       await this.pool.query(

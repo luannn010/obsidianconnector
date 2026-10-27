@@ -8,6 +8,13 @@ interface Queryable {
   ): Promise<{ rows: Row[] }>;
 }
 
+export class ProjectNotReconciledError extends Error {
+  constructor() {
+    super('Project must be reconciled before worktrees are synchronized');
+    this.name = 'ProjectNotReconciledError';
+  }
+}
+
 export interface WorktreeIndexResult {
   worktreePath: string;
   changed: boolean;
@@ -59,7 +66,20 @@ export async function synchronizeProjectWorktrees(
   indexedWorktrees: WorktreeIndexResult[];
 }> {
   const primaryPath = path.resolve(project.repositoryPath);
-  const worktrees = await worker.syncWorktrees(project);
+  const indexedWorktrees: WorktreeIndexResult[] = [];
+  const seen = new Set<string>();
+  let worktrees: Awaited<ReturnType<WorktreeSynchronizer['syncWorktrees']>>;
+  try {
+    worktrees = await worker.syncWorktrees(project);
+  } catch (error) {
+    if (!(error instanceof ProjectNotReconciledError)) throw error;
+    indexedWorktrees.push({
+      worktreePath: primaryPath,
+      ...(await worker.reconcile(project)),
+    });
+    seen.add(primaryPath.toLowerCase());
+    worktrees = await worker.syncWorktrees(project);
+  }
   const targetPaths = options.targetPaths
     ? new Set(
         options.targetPaths.map((worktreePath) =>
@@ -67,8 +87,6 @@ export async function synchronizeProjectWorktrees(
         ),
       )
     : undefined;
-  const indexedWorktrees: WorktreeIndexResult[] = [];
-  const seen = new Set<string>();
   for (const discoveredPath of [primaryPath, ...worktrees.paths]) {
     const worktreePath = path.resolve(discoveredPath);
     const normalized = worktreePath.toLowerCase();
