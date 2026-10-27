@@ -38,7 +38,16 @@ try {
     token,
     input,
   });
-  if (result.blocked) {
+  if (result.context) {
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'SessionStart',
+          additionalContext: result.context,
+        },
+      }),
+    );
+  } else if (result.blocked) {
     process.stdout.write(
       JSON.stringify({
         decision: 'block',

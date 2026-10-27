@@ -81,4 +81,32 @@ describe('activity loopback HTTP server', () => {
       refs: ['knowledge:item-1:v2'],
     });
   });
+  it('returns the cross-agent handoff for a session start', async () => {
+    const requests: unknown[] = [];
+    const baseUrl = await start({
+      record: async () => ({ accepted: 0, ignored: 0 }),
+      gate: async () => ({ blocked: false, refs: [] }),
+      handoff: async (input) => {
+        requests.push(input);
+        return { tasks: [], blockers: ['blocked'] };
+      },
+    });
+    const response = await fetch(`${baseUrl}/v1/handoff`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer local-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        projectKey: 'P',
+        agent: 'claude',
+        cwd: 'C:/repo',
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ tasks: [], blockers: ['blocked'] });
+    expect(requests).toEqual([
+      { projectKey: 'P', agent: 'claude', cwd: 'C:/repo' },
+    ]);
+  });
 });

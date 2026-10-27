@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   PgActivityHandler,
@@ -102,5 +103,65 @@ describe('PostgreSQL agent activity handler', () => {
       blocked: true,
       refs: ['knowledge:item-1:v2'],
     });
+  });
+  it('summarizes the other agent recent tasks, changed files, and blockers', async () => {
+    const queries: Array<{ sql: string; values: unknown[] }> = [];
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('not used');
+      },
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        values: unknown[] = [],
+      ): Promise<PgQueryResult<Row>> => {
+        queries.push({ sql, values });
+        if (sql.includes('changed_by_task'))
+          return {
+            rows: [
+              {
+                agent: 'codex',
+                task_name: 'Add metrics loader',
+                status: 'completed',
+                last_seen_at: new Date('2026-10-27T01:00:00.000Z'),
+                branch: 'feat/mcp-metrics',
+                changed_files: ['src/metrics-loader.ts', 'src/server.ts'],
+                changed_count: '3',
+                stale_refs: ['knowledge:item-1:v2'],
+              },
+            ] as unknown as Row[],
+          };
+        if (sql.includes("kind='blocker'"))
+          return { rows: [{ title: 'Heartbeat stale' }] as unknown as Row[] };
+        return { rows: [] };
+      },
+    };
+    const result = await new PgActivityHandler(pool, resolver).handoff({
+      projectKey: 'MC-Platform',
+      agent: 'claude',
+      cwd: 'C:\\repo\\src',
+    });
+    expect(result).toEqual({
+      tasks: [
+        {
+          agent: 'codex',
+          taskName: 'Add metrics loader',
+          status: 'completed',
+          lastSeenAt: '2026-10-27T01:00:00.000Z',
+          branch: 'feat/mcp-metrics',
+          changedFiles: ['src/metrics-loader.ts', 'src/server.ts'],
+          moreFiles: 1,
+          staleRefs: ['knowledge:item-1:v2'],
+        },
+      ],
+      blockers: ['Heartbeat stale'],
+    });
+    const taskQuery = queries.find((query) =>
+      query.sql.includes('changed_by_task'),
+    )!;
+    expect(taskQuery.values).toEqual([
+      'MC-Platform',
+      'codex',
+      path.resolve('C:\\repo'),
+    ]);
   });
 });

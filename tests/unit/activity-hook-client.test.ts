@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   appendActivitySpool,
+  formatHandoffContext,
   runActivityHook,
 } from '../../src/activity/hook-client.js';
 
@@ -119,6 +120,112 @@ describe('agent activity hook client', () => {
     expect(result).toEqual({ blocked: false, refs: [], spooled: false });
     expect(urls).toHaveLength(1);
     expect(urls[0]).toContain('/v1/activity');
+  });
+
+  it('injects the other agent handoff as context on session start', async () => {
+    const calls: Array<{ url: string; body?: string }> = [];
+    const result = await runActivityHook({
+      agent: 'claude',
+      projectKey: 'Obsidian-Connector',
+      baseUrl: 'http://127.0.0.1:8765',
+      token: 'token',
+      input: {
+        session_id: 'claude-1',
+        cwd: 'C:/repo',
+        hook_event_name: 'SessionStart',
+      },
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), body: init?.body as string });
+        if (String(url).endsWith('/v1/handoff'))
+          return Response.json({
+            tasks: [
+              {
+                agent: 'codex',
+                taskName: 'Add metrics loader',
+                status: 'completed',
+                lastSeenAt: '2026-10-27T01:00:00.000Z',
+                branch: 'feat/mcp-metrics',
+                changedFiles: ['src/metrics-loader.ts'],
+                moreFiles: 0,
+                staleRefs: ['knowledge:item-1:v2'],
+              },
+            ],
+            blockers: ['Embedding worker heartbeat stale'],
+          });
+        return new Response(null, { status: 202 });
+      },
+      spool: async () => undefined,
+    });
+    expect(calls[1]?.url).toBe('http://127.0.0.1:8765/v1/handoff');
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      projectKey: 'Obsidian-Connector',
+      agent: 'claude',
+      cwd: 'C:/repo',
+    });
+    expect(result.context).toContain('Add metrics loader');
+    expect(result.context).toContain('src/metrics-loader.ts');
+    expect(result.context).toContain('knowledge:item-1:v2');
+    expect(result.context).toContain('Embedding worker heartbeat stale');
+  });
+
+  it('skips the handoff when the daemon fails or nothing is pending', async () => {
+    const result = await runActivityHook({
+      agent: 'codex',
+      projectKey: 'Obsidian-Connector',
+      baseUrl: 'http://127.0.0.1:8765',
+      token: 'token',
+      input: {
+        session_id: 'c-1',
+        cwd: 'C:/repo',
+        hook_event_name: 'SessionStart',
+      },
+      fetchImpl: async (url) =>
+        String(url).endsWith('/v1/handoff')
+          ? new Response(null, { status: 500 })
+          : new Response(null, { status: 202 }),
+      spool: async () => undefined,
+    });
+    expect(result).toEqual({ blocked: false, refs: [], spooled: false });
+    expect(formatHandoffContext({ tasks: [], blockers: [] })).toBeUndefined();
+  });
+
+  it('keeps the handoff context within its character budget', () => {
+    const context = formatHandoffContext({
+      tasks: Array.from({ length: 3 }, (_, index) => ({
+        agent: 'codex' as const,
+        taskName: `Task ${index} ${'x'.repeat(200)}`,
+        status: 'active',
+        lastSeenAt: '2026-10-27T01:00:00.000Z',
+        changedFiles: Array.from(
+          { length: 8 },
+          (_, file) => `src/${'y'.repeat(80)}-${file}.ts`,
+        ),
+        moreFiles: 12,
+        staleRefs: [],
+      })),
+      blockers: [],
+    });
+    expect(context!.length).toBeLessThanOrEqual(1600);
+    expect(context).toContain('+12 more');
+  });
+
+  it('strips markup from prompt-derived task names', () => {
+    const context = formatHandoffContext({
+      tasks: [
+        {
+          agent: 'claude',
+          taskName: '<pasted_content id="48d9">',
+          status: 'completed',
+          lastSeenAt: '2026-10-27T01:00:00.000Z',
+          changedFiles: ['src/a.ts'],
+          moreFiles: 0,
+          staleRefs: [],
+        },
+      ],
+      blockers: [],
+    });
+    expect(context).toContain(']: Untitled task');
+    expect(context).not.toContain('pasted_content');
   });
 
   it('bounds the outage spool by dropping its oldest complete records', async () => {
