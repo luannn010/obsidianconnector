@@ -4,3 +4,4 @@ coverage/
 config/vaults.json
 .env
 *.log
+.mcp.json
