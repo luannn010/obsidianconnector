@@ -675,4 +675,30 @@ END
 $fn$;
 `,
   },
+  {
+    id: '0011_embedding_cache',
+    sql: String.raw`
+CREATE TABLE IF NOT EXISTS project_knowledge.embedding_cache (
+  model_key text NOT NULL,
+  text_hash char(64) NOT NULL,
+  embedding vector NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_used_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(model_key,text_hash)
+);
+
+ALTER TABLE project_knowledge.search_chunks
+  ADD COLUMN IF NOT EXISTS embed_hash char(64);
+CREATE INDEX IF NOT EXISTS search_chunks_embed_hash_pending
+  ON project_knowledge.search_chunks(embed_hash) WHERE embedding IS NULL;
+
+DO $grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='knowledge_connector') THEN
+    GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE project_knowledge.embedding_cache TO knowledge_connector;
+  END IF;
+END
+$grant$;
+`,
+  },
 ];

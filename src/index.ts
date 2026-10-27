@@ -32,9 +32,9 @@ export async function main(): Promise<void> {
     process.env.MCP_METRICS_DISABLED === 'true' ? null : loadMetricsModule();
   const metrics = metricsModule
     ? metricsModule.createMetricsRecorder({
-          server: 'obsidian-local',
-          databaseUrl: metricsUrl,
-        })
+        server: 'obsidian-local',
+        databaseUrl: metricsUrl,
+      })
     : undefined;
   const embedder = runtime.embeddingBaseUrl
     ? new OpenAiCompatibleEmbeddingClient(
@@ -50,7 +50,16 @@ export async function main(): Promise<void> {
         runtime.poolMax,
         runtime.statementTimeoutMs,
         {
-          ...(embedder ? { embedder } : {}),
+          ...(embedder
+            ? {
+                embedder,
+                embeddingCacheModel: {
+                  name: runtime.embeddingModel,
+                  revision: runtime.embeddingRevision,
+                  dimensions: runtime.embeddingDimensions,
+                },
+              }
+            : {}),
           ...(runtime.rerankerEnabled && runtime.rerankerBaseUrl
             ? {
                 reranker: new HttpCrossEncoderReranker(

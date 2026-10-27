@@ -36,6 +36,7 @@ describe('project knowledge migrations', () => {
       'worker_health',
       'knowledge_change_sets',
       'knowledge_change_entries',
+      'embedding_cache',
     ]) {
       expect(sql).toContain(`project_knowledge.${table}`);
     }
@@ -65,6 +66,12 @@ describe('project knowledge migrations', () => {
     expect(sql).toContain('required_capability text');
     expect(sql).toContain('parent_job_id uuid');
     expect(sql).toContain('outbox_jobs_one_live_key');
+    expect(sql).toContain('search_chunks_embed_hash_pending');
+    expect(sql).toContain('embed_hash char(64)');
+    expect(sql).toContain('model_key text NOT NULL');
+    expect(sql).toContain('last_used_at timestamptz');
+    expect(sql).toContain('PRIMARY KEY(model_key,text_hash)');
+    expect(sql).toContain('TO knowledge_connector');
     expect(
       knowledgeMigrations.find(
         (migration) => migration.id === '0009_domain_manifest_ignored_paths',
@@ -98,7 +105,7 @@ describe('project knowledge migrations', () => {
     );
     expect(migration!.sql).toContain("date_trunc('hour', started_at, 'UTC')");
     expect(migration!.sql).toContain('tool_calls_started');
-    expect(knowledgeMigrations.at(-1)?.id).toBe('0010_mcp_tool_call_metrics');
+    expect(knowledgeMigrations.at(-1)?.id).toBe('0011_embedding_cache');
   });
 
   it('skips an applied migration only when its checksum matches', async () => {
