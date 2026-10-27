@@ -7,6 +7,34 @@ const projectKey = z.string();
 const maxTokens = (fallback: number, maximum: number) =>
   z.number().int().min(100).max(maximum).default(fallback);
 const filters = z.record(z.array(z.string())).optional();
+const knowledgeChangeItemSchema = z.object({
+  id: z.string().optional(),
+  stableKey: z.string().optional(),
+  kind: z.string(),
+  title: z.string().optional(),
+  bodyMarkdown: z.string().optional(),
+  deliveryStatus: z.string().optional(),
+  verificationStatus: z.string().optional(),
+  domain: z.string().optional(),
+  service: z.string().optional(),
+  properties: z.record(z.unknown()).optional(),
+});
+const knowledgeEvidenceSchema = z.object({
+  snapshotId: z.string(),
+  ref: z.string(),
+  locatorType: z
+    .enum(['path', 'symbol', 'endpoint', 'table', 'migration', 'test'])
+    .optional(),
+  required: z.boolean().optional(),
+  verificationScope: z.enum(['required', 'warning']).optional(),
+});
+const knowledgeChangeSchema = z.object({
+  operation: z.enum(['create', 'patch', 'append', 'supersede']),
+  expectedVersion: z.number().int().min(0).optional(),
+  supersedesId: z.string().optional(),
+  evidence: z.array(knowledgeEvidenceSchema).optional(),
+  item: knowledgeChangeItemSchema,
+});
 
 export function registerKnowledgeTools(
   server: McpServer,
@@ -90,7 +118,7 @@ export function registerKnowledgeTools(
         actor: z.string(),
         taskId: z.string().optional(),
         expectedProjectRevision: z.number().int().min(0).optional(),
-        changes: z.array(z.any()).min(1).max(20),
+        changes: z.array(knowledgeChangeSchema).min(1).max(20),
       },
     },
     async (input) =>

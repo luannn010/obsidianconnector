@@ -740,6 +740,27 @@ export class PgKnowledgeStore implements KnowledgeStore {
   async writeProjectKnowledge(
     input: WriteProjectKnowledgeInput,
   ): Promise<KnowledgeWriteResult> {
+    const normalizedChanges = input.changes
+      .map((change, index) => {
+        if (!change || typeof change !== 'object' || !('item' in change)) {
+          throw new KnowledgeError(
+            'VERSION_CONFLICT',
+            'Each knowledge change must include an item object',
+            false,
+            { index },
+          );
+        }
+        const candidate = change as KnowledgeChange;
+        if (!candidate.item || typeof candidate.item !== 'object') {
+          throw new KnowledgeError(
+            'VERSION_CONFLICT',
+            'Each knowledge change must include a valid item',
+            false,
+            { index },
+          );
+        }
+        return candidate;
+      });
     const client = await this.pool.connect().catch((error: unknown) => {
       throw asKnowledgeError(error);
     });
@@ -773,10 +794,10 @@ export class PgKnowledgeStore implements KnowledgeStore {
         );
       }
       const nextRevision = Number(projectRow.db_revision) + 1;
-      const requestsVerifiedCompletion = input.changes.some(
+      const requestsVerifiedCompletion = normalizedChanges.some(
         (change) =>
-          change.item.deliveryStatus === 'completed' &&
-          change.item.verificationStatus !== undefined &&
+          change.item?.deliveryStatus === 'completed' &&
+          change.item?.verificationStatus !== undefined &&
           change.item.verificationStatus !== 'unverified',
       );
       if (requestsVerifiedCompletion && input.taskId) {
@@ -810,9 +831,14 @@ export class PgKnowledgeStore implements KnowledgeStore {
         }
       }
       const changes = [] as KnowledgeWriteResult['changes'];
-      for (const change of input.changes) {
+      for (const change of normalizedChanges) {
         changes.push(
-          await this.applyChange(client, projectRow.project_id, input, change),
+          await this.applyChange(
+            client,
+            projectRow.project_id,
+            input,
+            change,
+          ),
         );
       }
       await client.query(
@@ -839,6 +865,13 @@ export class PgKnowledgeStore implements KnowledgeStore {
     input: WriteProjectKnowledgeInput,
     change: KnowledgeChange,
   ): Promise<KnowledgeWriteResult['changes'][number]> {
+    if (!change || typeof change !== 'object' || typeof change.item !== 'object') {
+      throw new KnowledgeError(
+        'VERSION_CONFLICT',
+        'Knowledge change missing item payload',
+        false,
+      );
+    }
     let existing: ItemRow | undefined;
     if (change.item.id) {
       existing = (
@@ -878,6 +911,13 @@ export class PgKnowledgeStore implements KnowledgeStore {
     }
     const itemId = existing?.id ?? change.item.id ?? randomUUID();
     const version = (existing?.current_version ?? 0) + 1;
+    if (!change.item.kind && !existing?.kind) {
+      throw new KnowledgeError(
+        'VERSION_CONFLICT',
+        'Knowledge item kind is required',
+        false,
+      );
+    }
     const title = change.item.title ?? existing?.title;
     if (!title)
       throw new KnowledgeError(
@@ -925,7 +965,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
     if (!existing) {
       const stableKey =
         change.item.stableKey ??
-        `${change.item.kind}:${title
+        `${record.kind}:${title
           .toLowerCase()
           .replace(/[^a-z0-9]+/gu, '-')
           .replace(/^-|-$/gu, '')}:${itemId.slice(0, 8)}`;
@@ -936,7 +976,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
         [
           itemId,
           projectId,
-          change.item.kind,
+          record.kind,
           stableKey,
           title,
           version,
