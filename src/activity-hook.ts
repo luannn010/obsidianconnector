@@ -1,7 +1,10 @@
 import { loadDotEnv } from './config/registry.js';
 import os from 'node:os';
 import path from 'node:path';
-import { runActivityHook } from './activity/hook-client.js';
+import {
+  resolveActivityProjectKey,
+  runActivityHook,
+} from './activity/hook-client.js';
 import type { ActivityAgent } from './activity/hook-normalizer.js';
 
 loadDotEnv();
@@ -28,10 +31,10 @@ if (!token) process.exit(0);
 try {
   const raw = await readStdin();
   const input = raw.trim() ? (JSON.parse(raw) as unknown) : {};
+  const projectKey = await resolveActivityProjectKey(process.cwd());
   const result = await runActivityHook({
     agent,
-    projectKey:
-      process.env.PROJECT_KNOWLEDGE_PROJECT_KEY?.trim() || 'MC-Platform',
+    ...(projectKey ? { projectKey } : {}),
     baseUrl:
       process.env.PROJECT_KNOWLEDGE_ACTIVITY_BASE_URL?.trim() ||
       'http://127.0.0.1:8765',

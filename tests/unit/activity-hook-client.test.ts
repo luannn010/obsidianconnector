@@ -1,19 +1,70 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
   appendActivitySpool,
   formatHandoffContext,
+  resolveActivityProjectKey,
   runActivityHook,
 } from '../../src/activity/hook-client.js';
 
 describe('agent activity hook client', () => {
+  it('resolves the project key from the environment before repository config', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'activity-hook-key-'));
+    await mkdir(path.join(root, '.git'));
+    await mkdir(path.join(root, '.obsidian-local'));
+    await writeFile(
+      path.join(root, '.obsidian-local', 'config.json'),
+      JSON.stringify({ projectKey: 'Config-Project' }),
+    );
+
+    await expect(
+      resolveActivityProjectKey(root, {
+        PROJECT_KNOWLEDGE_PROJECT_KEY: ' Env-Project ',
+      }),
+    ).resolves.toBe('Env-Project');
+  });
+
+  it('resolves the project key from the git root config for a nested cwd', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'activity-hook-key-'));
+    const cwd = path.join(root, 'src', 'nested');
+    await mkdir(path.join(root, '.git'));
+    await mkdir(path.join(root, '.obsidian-local'));
+    await mkdir(cwd, { recursive: true });
+    await writeFile(
+      path.join(root, '.obsidian-local', 'config.json'),
+      JSON.stringify({ projectKey: 'Config-Project' }),
+    );
+
+    await expect(resolveActivityProjectKey(cwd, {})).resolves.toBe(
+      'Config-Project',
+    );
+  });
+
+  it('omits the project key when neither environment nor git config provides one', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'activity-hook-key-'));
+    const bodies: Array<Record<string, unknown>> = [];
+    await runActivityHook({
+      agent: 'codex',
+      baseUrl: 'http://127.0.0.1:8765',
+      token: 'token',
+      input: { session_id: 'task-0', cwd: root },
+      fetchImpl: async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(null, { status: 202 });
+      },
+      spool: async () => undefined,
+    });
+
+    expect(bodies[0]).not.toHaveProperty('projectKey');
+  });
+
   it('sends normalized metadata without preserving the submitted prompt', async () => {
     const bodies: string[] = [];
     const result = await runActivityHook({
       agent: 'codex',
-      projectKey: 'MC-Platform',
+      projectKey: 'Test-Project',
       baseUrl: 'http://127.0.0.1:8765',
       token: 'token',
       input: {
@@ -39,7 +90,7 @@ describe('agent activity hook client', () => {
     const spooled: unknown[] = [];
     const result = await runActivityHook({
       agent: 'claude',
-      projectKey: 'MC-Platform',
+      projectKey: 'Test-Project',
       baseUrl: 'http://127.0.0.1:8765',
       token: 'token',
       input: {
@@ -70,7 +121,7 @@ describe('agent activity hook client', () => {
   it('returns a compact blocker only when the stop gate reports stale docs', async () => {
     const result = await runActivityHook({
       agent: 'codex',
-      projectKey: 'MC-Platform',
+      projectKey: 'Test-Project',
       baseUrl: 'http://127.0.0.1:8765',
       token: 'token',
       input: {
@@ -102,7 +153,7 @@ describe('agent activity hook client', () => {
     const urls: string[] = [];
     const result = await runActivityHook({
       agent: 'codex',
-      projectKey: 'MC-Platform',
+      projectKey: 'Test-Project',
       baseUrl: 'http://127.0.0.1:8765',
       token: 'token',
       input: {
@@ -234,7 +285,7 @@ describe('agent activity hook client', () => {
     for (let index = 0; index < 8; index++)
       await appendActivitySpool(
         {
-          projectKey: 'MC-Platform',
+          projectKey: 'Test-Project',
           agent: 'codex',
           sessionId: `task-${index}`,
           cwd: 'C:/repo',

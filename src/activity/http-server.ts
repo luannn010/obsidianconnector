@@ -7,15 +7,17 @@ import {
 export interface ActivityRequestHandler {
   record(payload: unknown): Promise<{ accepted: number; ignored: number }>;
   gate(input: {
-    projectKey: string;
+    projectKey?: string;
     agent: string;
     sessionId: string;
+    cwd?: string;
   }): Promise<{ blocked: boolean; refs: string[] }>;
   handoff?(input: {
-    projectKey: string;
+    projectKey?: string;
     agent: string;
     cwd: string;
   }): Promise<ActivityHandoff>;
+  status?(input: { cwd: string; projectKey?: string }): Promise<ActivityStatus>;
 }
 
 export interface ActivityHandoffTask {
@@ -32,6 +34,14 @@ export interface ActivityHandoffTask {
 export interface ActivityHandoff {
   tasks: ActivityHandoffTask[];
   blockers: string[];
+}
+
+export interface ActivityStatus {
+  projectKey: string | null;
+  lastEventAt: {
+    claude: string | null;
+    codex: string | null;
+  };
 }
 
 export interface ActivityHttpServerOptions {
@@ -92,10 +102,9 @@ export function createActivityHttpServer(options: ActivityHttpServerOptions) {
           response,
           200,
           await options.handler.handoff({
-            projectKey:
-              typeof body.projectKey === 'string' && body.projectKey.trim()
-                ? body.projectKey.trim()
-                : 'MC-Platform',
+            ...(typeof body.projectKey === 'string' && body.projectKey.trim()
+              ? { projectKey: body.projectKey.trim() }
+              : {}),
             agent: body.agent,
             cwd: body.cwd,
           }),
@@ -106,10 +115,13 @@ export function createActivityHttpServer(options: ActivityHttpServerOptions) {
         /^\/v1\/tasks\/(codex|claude)\/([^/]+)\/gate$/u,
       );
       if (request.method === 'GET' && gate) {
+        const projectKey = url.searchParams.get('projectKey')?.trim();
+        const cwd = url.searchParams.get('cwd')?.trim();
         const result = await options.handler.gate({
-          projectKey: url.searchParams.get('projectKey') ?? 'MC-Platform',
+          ...(projectKey ? { projectKey } : {}),
           agent: gate[1]!,
           sessionId: decodeURIComponent(gate[2]!),
+          ...(cwd ? { cwd } : {}),
         });
         if (result.blocked) {
           json(response, 409, {
@@ -118,6 +130,24 @@ export function createActivityHttpServer(options: ActivityHttpServerOptions) {
             refs: result.refs.slice(0, 20),
           });
         } else json(response, 200, { blocked: false, refs: [] });
+        return;
+      }
+      if (
+        request.method === 'GET' &&
+        url.pathname === '/v1/status' &&
+        options.handler.status
+      ) {
+        const cwd = url.searchParams.get('cwd')?.trim();
+        if (!cwd) throw new Error('Invalid status request');
+        const projectKey = url.searchParams.get('projectKey')?.trim();
+        json(
+          response,
+          200,
+          await options.handler.status({
+            cwd,
+            ...(projectKey ? { projectKey } : {}),
+          }),
+        );
         return;
       }
       json(response, 404, { error: 'not_found' });
