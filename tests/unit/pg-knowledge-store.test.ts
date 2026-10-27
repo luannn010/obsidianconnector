@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { KnowledgeError } from '../../src/knowledge/errors.js';
 import { canonicalHash } from '../../src/knowledge/hash.js';
+import { embeddingHash } from '../../src/knowledge/embed-text.js';
 import {
   PgKnowledgeStore,
   type PgClientLike,
@@ -303,6 +304,44 @@ describe('PostgreSQL knowledge store', () => {
       sql.includes('INSERT INTO project_knowledge.knowledge_items'),
     );
     expect(insert?.values?.[2]).toBe('decision');
+  });
+
+  it('stores an embedding hash and priority 100 for knowledge chunks', async () => {
+    const client = new KnowledgeWriteClient();
+    const store = new PgKnowledgeStore({
+      connect: async () => client,
+      query: (sql, values) => client.query(sql, values),
+    });
+
+    await store.writeProjectKnowledge({
+      projectKey: 'MC-Platform',
+      actor: 'codex',
+      changes: [
+        {
+          operation: 'create',
+          item: {
+            kind: 'decision',
+            title: 'Embed meaningful chunks',
+            bodyMarkdown: 'Knowledge items receive the highest priority.',
+          },
+        },
+      ],
+    });
+
+    const chunkInsert = client.queries.find(({ sql }) =>
+      sql.includes('INSERT INTO project_knowledge.search_chunks'),
+    );
+    const embedJob = client.queries.find(({ sql }) =>
+      sql.includes("VALUES($1,'embed_chunk'"),
+    );
+    expect(chunkInsert?.sql).toContain('embed_hash');
+    expect(chunkInsert?.values?.[10]).toBe(
+      embeddingHash(
+        'Embed meaningful chunks\n\nKnowledge items receive the highest priority.',
+      ),
+    );
+    expect(embedJob?.sql).toContain('priority');
+    expect(embedJob?.values?.[2]).toBe(100);
   });
 
   it('persists a normalized kind when patching an existing item', async () => {
@@ -744,6 +783,44 @@ describe('PostgreSQL knowledge store', () => {
     expect(result.warnings).toEqual([
       'Semantic retrieval unavailable; BM25 results returned',
     ]);
+  });
+
+  it('guards unscoped hybrid candidates with active snapshot state', async () => {
+    let hybridSql = '';
+    const pool: PgPoolLike = {
+      connect: async () => {
+        throw new Error('not used by search');
+      },
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('FROM project_knowledge.projects'))
+          return {
+            rows: [
+              { project_id: 'project-1', db_revision: 4 },
+            ] as unknown as Row[],
+          };
+        hybridSql = sql;
+        return { rows: [] };
+      },
+    };
+
+    await new PgKnowledgeStore(pool, {
+      embedder: { embed: async () => [0.1, 0.2] },
+    }).searchProjectContext({
+      projectKey: 'MC-Platform',
+      query: 'embedding policy',
+      mode: 'hybrid',
+      limit: 6,
+      maxTokens: 2000,
+    });
+
+    expect(hybridSql).toContain(
+      'LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id',
+    );
+    expect(hybridSql).toContain(
+      "($2::uuid IS NOT NULL OR c.snapshot_id IS NULL OR s.state='active')",
+    );
   });
 
   it('reports stale source freshness when an indexed worktree no longer matches its active snapshot', async () => {

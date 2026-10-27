@@ -20,7 +20,11 @@ import {
   shouldIndexPath,
 } from './git-worktree.js';
 import { inventoryLegacyNotes } from './legacy-inventory.js';
-import { parseSourceUnits } from './source-parser.js';
+import {
+  parseSourceUnits,
+  splitDocumentationUnit,
+  type SourceUnit,
+} from './source-parser.js';
 import { buildProjectViews, type ProjectViewData } from './vault-views.js';
 import {
   publishProjection,
@@ -38,6 +42,10 @@ import {
   ProjectNotReconciledError,
 } from './worktree-lifecycle.js';
 import { EmbeddingQueueProcessor } from './embedding-queue-processor.js';
+import {
+  EMBEDDABLE_CHUNK_KINDS,
+  embeddingHash,
+} from '../knowledge/embed-text.js';
 
 export interface WorkerProject {
   projectKey: string;
@@ -46,7 +54,27 @@ export interface WorkerProject {
   vaultPath: string;
 }
 
-const SOURCE_PARSER_REVISION = 'structural-v2';
+export const SOURCE_PARSER_REVISION = 'structural-v3';
+
+const EMBEDDABLE_KINDS = new Set<string>(EMBEDDABLE_CHUNK_KINDS);
+const EMBEDDING_PRIORITIES: Record<string, number> = {
+  documentation: 50,
+  api_endpoint: 40,
+  database_table: 40,
+  file_summary: 30,
+};
+
+export function sourceChunkEmbeddingPolicy(
+  kind: SourceUnit['kind'],
+  content: string,
+  isPrimaryWorktree: boolean,
+): { embedHash: string | null; priority: number | null } {
+  if (!EMBEDDABLE_KINDS.has(kind)) return { embedHash: null, priority: null };
+  return {
+    embedHash: embeddingHash(content),
+    priority: EMBEDDING_PRIORITIES[kind]! - (isPrimaryWorktree ? 0 : 20),
+  };
+}
 
 function dirtyPaths(status: string): string[] {
   return status
@@ -273,8 +301,8 @@ export class KnowledgeWorker {
           [previous.id, snapshot.id],
         );
         await client.query(
-          `INSERT INTO project_knowledge.search_chunks(project_id,item_id,snapshot_id,parent_ref,kind,domain,service,worktree_id,title,content,content_hash,token_count,embedding,embedding_model_id,metadata)
-          SELECT project_id,item_id,$2,parent_ref,kind,domain,service,worktree_id,title,content,content_hash,token_count,embedding,embedding_model_id,metadata
+          `INSERT INTO project_knowledge.search_chunks(project_id,item_id,snapshot_id,parent_ref,kind,domain,service,worktree_id,title,content,content_hash,token_count,embedding,embedding_model_id,embed_hash,metadata)
+          SELECT project_id,item_id,$2,parent_ref,kind,domain,service,worktree_id,title,content,content_hash,token_count,embedding,embedding_model_id,embed_hash,metadata
           FROM project_knowledge.search_chunks WHERE snapshot_id=$1`,
           [previous.id, snapshot.id],
         );
@@ -323,16 +351,16 @@ export class KnowledgeWorker {
         const units = parseSourceUnits(change.path, content);
         const effectiveUnits = units.length
           ? units
-          : [
-              {
-                kind: 'documentation' as const,
-                title: change.path,
-                content: content.slice(0, 4000),
-                startLine: 1,
-                endLine: content.split('\n').length,
-                contentHash: fileHash,
-              },
-            ];
+          : splitDocumentationUnit({
+              title: change.path,
+              headingLine: change.path,
+              content,
+              startLine: 1,
+              endLine: content.split('\n').length,
+            });
+        const isPrimaryWorktree =
+          path.resolve(fingerprint.root).toLowerCase() ===
+          primaryRepositoryPath.toLowerCase();
         for (const unit of effectiveUnits) {
           if (unit.kind === 'symbol' && unit.symbol)
             await client.query(
@@ -357,10 +385,15 @@ export class KnowledgeWorker {
             lines: { start: unit.startLine, end: unit.endLine },
             citation: `${change.path}:${unit.startLine}`,
           };
+          const embeddingPolicy = sourceChunkEmbeddingPolicy(
+            unit.kind,
+            unit.content,
+            isPrimaryWorktree,
+          );
           const inserted = await client.query<{ id: string }>(
             `INSERT INTO project_knowledge.search_chunks
-            (project_id,snapshot_id,worktree_id,kind,title,content,content_hash,token_count,metadata)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+            (project_id,snapshot_id,worktree_id,kind,title,content,content_hash,token_count,embed_hash,metadata)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
             [
               projectRow.project_id,
               snapshot.id,
@@ -370,20 +403,23 @@ export class KnowledgeWorker {
               unit.content,
               unit.contentHash,
               countSerializedTokens(unit.content),
+              embeddingPolicy.embedHash,
               metadata,
             ],
           );
-          await client.query(
-            `INSERT INTO project_knowledge.outbox_jobs
-              (project_id,job_type,job_key,required_capability,parent_job_id,payload)
-            VALUES($1,'embed_chunk',$2,'embedding',$3,$4) ON CONFLICT DO NOTHING`,
-            [
-              projectRow.project_id,
-              `embed:${inserted.rows[0]!.id}`,
-              options.parentJobId ?? null,
-              { chunkId: inserted.rows[0]!.id },
-            ],
-          );
+          if (embeddingPolicy.priority !== null)
+            await client.query(
+              `INSERT INTO project_knowledge.outbox_jobs
+                (project_id,job_type,job_key,required_capability,parent_job_id,payload,priority)
+              VALUES($1,'embed_chunk',$2,'embedding',$3,$4,$5) ON CONFLICT DO NOTHING`,
+              [
+                projectRow.project_id,
+                `embed:${inserted.rows[0]!.id}`,
+                options.parentJobId ?? null,
+                { chunkId: inserted.rows[0]!.id },
+                embeddingPolicy.priority,
+              ],
+            );
         }
         indexedFiles++;
       }
