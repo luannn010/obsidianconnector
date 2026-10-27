@@ -10,18 +10,28 @@ describe('QueueWorkerService', () => {
         queries.push({ sql, values });
         if (sql.includes('FROM project_knowledge.projects'))
           return { rows: [{ project_id: 'project-1' }] };
-        if (sql.includes('FILTER')) return { rows: [{ pending: 12, failed: 0 }] };
+        if (sql.includes('FILTER'))
+          return { rows: [{ pending: 12, failed: 0 }] };
         return { rows: [] };
       }),
     } as unknown as Pool;
     const processor = {
       processBatch: vi.fn(async () => ({
-        claimed: 5, embedded: 2, applied: 5, reused: 3,
-        retired: 7, completed: 1, failed: 0,
+        claimed: 5,
+        embedded: 2,
+        applied: 5,
+        reused: 3,
+        cacheHits: 3,
+        reenqueued: 0,
+        retired: 7,
+        completed: 1,
+        failed: 0,
       })),
     };
     const service = new QueueWorkerService(pool, processor, {
-      projectKey: 'MC-Platform', releaseId: 'release-1', workerRole: 'embedding-queue',
+      projectKey: 'MC-Platform',
+      releaseId: 'release-1',
+      workerRole: 'embedding-queue',
     });
 
     await service.runOnce(50);
@@ -29,6 +39,8 @@ describe('QueueWorkerService', () => {
     const heartbeat = queries.find(({ sql }) => sql.includes('worker_health'))!;
     expect(heartbeat.values).toContain('release-1');
     expect(heartbeat.values).toContain(12);
-    expect(heartbeat.sql).toContain('processed_count=project_knowledge.worker_health.processed_count');
+    expect(heartbeat.sql).toContain(
+      'processed_count=project_knowledge.worker_health.processed_count',
+    );
   });
 });

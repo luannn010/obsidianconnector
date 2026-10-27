@@ -2,6 +2,8 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { Pool, type QueryResultRow } from 'pg';
 import { canonicalHash } from './hash.js';
+import { CachingEmbeddingProvider } from './embedding-cache.js';
+import type { EmbeddingModelKeyInput } from './embed-text.js';
 import { KnowledgeError } from './errors.js';
 import {
   countSerializedTokens,
@@ -161,6 +163,7 @@ function activeClaim(properties: Record<string, unknown>):
 
 export interface PgKnowledgeStoreOptions {
   embedder?: EmbeddingProvider;
+  embeddingCacheModel?: EmbeddingModelKeyInput;
   reranker?: Reranker;
   rerankerEnabled?: boolean;
 }
@@ -2378,8 +2381,19 @@ export function createPgKnowledgeStore(
     statement_timeout: statementTimeoutMs,
     application_name: 'obsidian-local-knowledge',
   });
+  const storeOptions =
+    options.embedder && options.embeddingCacheModel
+      ? {
+          ...options,
+          embedder: new CachingEmbeddingProvider(
+            options.embedder,
+            pool as unknown as PgPoolLike,
+            options.embeddingCacheModel,
+          ),
+        }
+      : options;
   return {
-    store: new PgKnowledgeStore(pool as unknown as PgPoolLike, options),
+    store: new PgKnowledgeStore(pool as unknown as PgPoolLike, storeOptions),
     pool,
   };
 }
