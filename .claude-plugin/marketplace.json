@@ -1,0 +1,12 @@
+{
+  "name": "project-setup",
+  "owner": {
+    "name": "Luan Nguyen"
+  },
+  "plugins": [
+    {
+      "name": "project-setup",
+      "source": "./"
+    }
+  ]
+}

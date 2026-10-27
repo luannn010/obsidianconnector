@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -9,7 +9,7 @@ try {
     & npm run knowledge:migrate
     if ($LASTEXITCODE -ne 0) { throw "Migration failed with exit code $LASTEXITCODE" }
   } else {
-    Write-Host 'Would apply pending project_knowledge migrations, including 0006_queue_worker_health.'
+    Write-Host 'Would apply pending project_knowledge migrations, including 0007_shared_worker_queue.'
   }
 } finally {
   Pop-Location

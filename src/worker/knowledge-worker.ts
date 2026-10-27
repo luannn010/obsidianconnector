@@ -51,6 +51,7 @@ export interface WorkerProject {
   projectKey: string;
   name: string;
   repositoryPath: string;
+  logicalRepositoryPath?: string;
   vaultPath: string;
 }
 
@@ -166,9 +167,10 @@ export class KnowledgeWorker {
   ): Promise<{ changed: boolean; snapshotId: string; indexedFiles: number }> {
     const fingerprint = await fingerprintWorktree(project.repositoryPath);
     const currentDirty = dirtyPaths(fingerprint.status);
-    const primaryRepositoryPath = path.resolve(
-      options.primaryRepositoryPath ?? fingerprint.root,
-    );
+    const logicalRepositoryPath =
+      project.logicalRepositoryPath ?? fingerprint.root;
+    const primaryRepositoryPath =
+      options.primaryRepositoryPath ?? logicalRepositoryPath;
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -207,7 +209,7 @@ export class KnowledgeWorker {
           [
             projectRow.project_id,
             repository.id,
-            fingerprint.root,
+            logicalRepositoryPath,
             fingerprint.branch,
             fingerprint.head,
             fingerprint.dirtyHash,
@@ -1292,7 +1294,10 @@ export class KnowledgeWorker {
       JOIN project_knowledge.worktrees w ON w.id=s.worktree_id
       WHERE s.project_id=$1 AND s.state='active' AND w.path=$2
       ORDER BY s.activated_at DESC LIMIT 1`,
-        [projectRow.project_id, path.resolve(project.repositoryPath)],
+        [
+          projectRow.project_id,
+          project.logicalRepositoryPath ?? path.resolve(project.repositoryPath),
+        ],
       )
     ).rows[0];
     const architecture = (

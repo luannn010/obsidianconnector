@@ -7,10 +7,10 @@ description: Use when retrieving, auditing, synchronizing, updating, or publishi
 
 ## Worker-backed source refresh
 
-When the user requests a refresh, or compact status returns `REINDEX_SOURCE`, run the zero-AI queue command from the deployed worker checkout instead of reading changed files into the conversation. A refresh-only request starts with this command; do not call `get_project_snapshot` first:
+When the user requests a refresh, or compact status returns `REINDEX_SOURCE`, run the zero-AI queue command from the connector checkout instead of reading changed files into the conversation. A refresh-only request starts with this command; do not call `get_project_snapshot` first:
 
 ```powershell
-& 'C:\Users\luann\Documents\Obisidian COnnector\.worktrees\shared-workers\scripts\sync-project-knowledge.ps1' -ProjectKey <project-key> -WorktreePath '<exact-worktree-path>' -Wait
+.\scripts\sync-project-knowledge.ps1 -ProjectKey <project-key> -WorktreePath '<exact-worktree-path>' -Wait
 ```
 
 The command deduplicates `source_sync` by worktree, starts the Windows Docker worker, and returns the authoritative `sync_runs` receipt. Treat `snapshotState: reused` as success: snapshots are created only when HEAD, the content-aware dirty fingerprint, or parser revision changed. Task or prompt completion does not create a snapshot. The Windows container normally exits after 60 idle seconds.

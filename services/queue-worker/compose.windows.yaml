@@ -1,0 +1,26 @@
+services:
+  queue-worker:
+    image: ${PROJECT_KNOWLEDGE_WORKER_IMAGE}
+    user: '0:0'
+    restart: 'no'
+    mem_limit: 512m
+    env_file:
+      - ${PROJECT_KNOWLEDGE_QUEUE_ENV_FILE}
+    environment:
+      NODE_OPTIONS: --max-old-space-size=384
+      PROJECT_KNOWLEDGE_HOST_KIND: windows
+      PROJECT_KNOWLEDGE_WORKER_CAPABILITIES: ${PROJECT_KNOWLEDGE_WINDOWS_CAPABILITIES:-source-sync,publish}
+      PROJECT_KNOWLEDGE_WORKER_RELEASE: ${PROJECT_KNOWLEDGE_WORKER_RELEASE}
+      PROJECT_KNOWLEDGE_PROJECTS_HOST_ROOT: ${PROJECT_KNOWLEDGE_PROJECTS_HOST_ROOT}
+      PROJECT_KNOWLEDGE_PROJECTS_CONTAINER_ROOT: /projects
+      PROJECT_KNOWLEDGE_SOURCE_WORKTREE_ID: ${PROJECT_KNOWLEDGE_SOURCE_WORKTREE_ID:-}
+      PROJECT_KNOWLEDGE_VAULTS_CONTAINER_ROOT: /vaults
+      PROJECT_KNOWLEDGE_IDLE_EXIT_SECONDS: 60
+    volumes:
+      - type: bind
+        source: ${PROJECT_KNOWLEDGE_PROJECTS_HOST_ROOT}
+        target: /projects
+        read_only: true
+      - type: bind
+        source: ${OBSIDIAN_VAULT_ROOT}
+        target: /vaults

@@ -189,7 +189,13 @@ describe('EmbeddingQueueProcessor', () => {
     );
     const claim = queries.find(({ sql }) => sql.includes('SKIP LOCKED'))!;
     expect(claim.sql).toContain('c.active');
-    expect(claim.sql).toContain('ORDER BY j.priority DESC, j.created_at');
+    expect(claim.sql).toContain(
+      'ORDER BY fair.project_rank, fair.priority DESC, fair.created_at',
+    );
+    expect(claim.sql).not.toContain('project_rank=1');
+    expect(claim.sql).toContain("j.required_capability='embedding'");
+    expect(claim.sql).toContain('j.attempts<j.max_attempts');
+    expect(claim.sql).toContain("lease_expires_at=now()+interval '2 minutes'");
     expect(claim.sql).toContain('chunks.embed_hash');
   });
 

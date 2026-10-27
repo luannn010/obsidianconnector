@@ -565,6 +565,28 @@ CREATE TABLE IF NOT EXISTS project_knowledge.worker_scheduler_state (
 `,
   },
   {
+    id: '0008_project_setup',
+    sql: String.raw`
+ALTER TABLE project_knowledge.projects
+  ADD COLUMN IF NOT EXISTS vault_name text DEFAULT '',
+  ADD COLUMN IF NOT EXISTS vault_relative_path text DEFAULT '';
+
+UPDATE project_knowledge.projects
+SET vault_name=COALESCE(vault_name,project_key),
+    vault_relative_path=COALESCE(vault_relative_path,project_key)
+WHERE vault_name IS NULL OR vault_relative_path IS NULL;
+
+ALTER TABLE project_knowledge.projects
+  ALTER COLUMN vault_name SET DEFAULT '',
+  ALTER COLUMN vault_relative_path SET DEFAULT '',
+  ALTER COLUMN vault_name SET NOT NULL,
+  ALTER COLUMN vault_relative_path SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS projects_vault_lookup
+  ON project_knowledge.projects(vault_name,vault_relative_path);
+`,
+  },
+  {
     id: '0008_low_token_change_history_and_lazy_views',
     sql: String.raw`
 CREATE TABLE IF NOT EXISTS project_knowledge.knowledge_change_sets (

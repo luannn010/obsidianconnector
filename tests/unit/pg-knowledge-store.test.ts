@@ -341,7 +341,8 @@ describe('PostgreSQL knowledge store', () => {
       ),
     );
     expect(embedJob?.sql).toContain('priority');
-    expect(embedJob?.values?.[2]).toBe(100);
+    expect(embedJob?.sql).toContain("'embed_chunk',$2,'embedding',100,$3");
+    expect(embedJob?.sql).toContain("'publish_item',$4,'publish',0,$5");
   });
 
   it('persists a normalized kind when patching an existing item', async () => {

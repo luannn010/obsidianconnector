@@ -1,0 +1,16 @@
+{
+  "name": "project-setup",
+  "interface": {
+    "displayName": "Project Setup"
+  },
+  "plugins": [
+    {
+      "name": "project-setup",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

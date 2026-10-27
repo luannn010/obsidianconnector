@@ -1,0 +1,9 @@
+{
+  "name": "project-setup",
+  "description": "Initialize Obsidian-backed project knowledge and source snapshots.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Luan Nguyen"
+  },
+  "skills": "./.codex/skills/"
+}

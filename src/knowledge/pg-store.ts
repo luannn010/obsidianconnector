@@ -1083,7 +1083,12 @@ export class PgKnowledgeStore implements KnowledgeStore {
       const changes = [] as KnowledgeWriteResult['changes'];
       for (const change of normalizedChanges) {
         changes.push(
-          await this.applyChange(client, projectRow.project_id, input, change),
+          await this.applyChange(
+            client,
+            projectRow.project_id,
+            input,
+            change,
+          ),
         );
       }
       const changed = changes.filter(
@@ -1588,9 +1593,16 @@ export class PgKnowledgeStore implements KnowledgeStore {
     await client.query(
       `INSERT INTO project_knowledge.outbox_jobs
         (project_id,job_type,job_key,required_capability,priority,payload)
-      VALUES($1,'embed_chunk',$2,'embedding',$3,$4)
+      VALUES($1,'embed_chunk',$2,'embedding',100,$3),
+            ($1,'publish_item',$4,'publish',0,$5)
       ON CONFLICT DO NOTHING`,
-      [projectId, `embed:${chunkId}`, 100, { chunkId }],
+      [
+        projectId,
+        `embed:${chunkId}`,
+        { chunkId },
+        `publish:${itemId}:${version}`,
+        { itemId, version },
+      ],
     );
     if (change.operation === 'supersede' && change.supersedesId) {
       await client.query(

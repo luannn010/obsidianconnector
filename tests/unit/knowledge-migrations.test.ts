@@ -37,6 +37,8 @@ describe('project knowledge migrations', () => {
       'knowledge_change_sets',
       'knowledge_change_entries',
       'embedding_cache',
+      'worker_instances',
+      'worker_scheduler_state',
     ]) {
       expect(sql).toContain(`project_knowledge.${table}`);
     }
@@ -86,6 +88,11 @@ describe('project knowledge migrations', () => {
     ).toBeDefined();
     expect(sql).toContain('idempotency_key text NOT NULL');
     expect(sql).toContain("'deferred'");
+    expect(sql).toContain('required_capability');
+    expect(sql).toContain('lease_expires_at');
+    expect(sql).toContain('outbox_jobs_one_live_key');
+    expect(sql).toContain('vault_name text');
+    expect(sql).toContain('vault_relative_path text');
     expect(sql).toContain('title, project_id, active, snapshot_id');
     for (const exactField of ['path', 'symbol', 'endpoint', 'schema_table']) {
       expect(sql).toContain(`lower(metadata->>'${exactField}')) WHERE active`);
