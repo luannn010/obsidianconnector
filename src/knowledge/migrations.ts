@@ -708,4 +708,13 @@ CREATE INDEX IF NOT EXISTS outbox_jobs_parent_job
   ON project_knowledge.outbox_jobs(parent_job_id) WHERE parent_job_id IS NOT NULL;
 `,
   },
+  {
+    id: '0013_foreign_key_indexes',
+    sql: String.raw`
+CREATE INDEX IF NOT EXISTS code_symbols_file
+  ON project_knowledge.code_symbols(file_id);
+CREATE INDEX IF NOT EXISTS worker_instances_current_job
+  ON project_knowledge.worker_instances(current_job_id) WHERE current_job_id IS NOT NULL;
+`,
+  },
 ];
