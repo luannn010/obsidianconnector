@@ -2,6 +2,8 @@
 param(
   [Parameter(Mandatory = $true)][string]$ProjectKey,
   [Parameter(Mandatory = $true)][string]$WorktreePath,
+  [string]$ProjectName,
+  [string]$VaultPath,
   [switch]$Wait,
   [switch]$LocalEmbeddingFallback
 )
@@ -10,14 +12,18 @@ $ErrorActionPreference = 'Stop'
 $connectorRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $resolvedWorktree = (Resolve-Path -LiteralPath $WorktreePath).Path
 $previousProjectKey = $env:PROJECT_KNOWLEDGE_PROJECT_KEY
+$previousProjectName = $env:PROJECT_KNOWLEDGE_PROJECT_NAME
 $previousRepositoryPath = $env:PROJECT_KNOWLEDGE_REPOSITORY_PATH
+$previousVaultPath = $env:PROJECT_KNOWLEDGE_VAULT_PATH
 $previousEmbeddingMode = $env:PROJECT_KNOWLEDGE_PROCESS_EMBEDDINGS
 Push-Location $connectorRoot
 try {
   & npm run build
   if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
   $env:PROJECT_KNOWLEDGE_PROJECT_KEY = $ProjectKey
+  $env:PROJECT_KNOWLEDGE_PROJECT_NAME = if ($ProjectName) { $ProjectName } else { $ProjectKey }
   $env:PROJECT_KNOWLEDGE_REPOSITORY_PATH = $resolvedWorktree
+  if ($VaultPath) { $env:PROJECT_KNOWLEDGE_VAULT_PATH = $VaultPath }
   $env:PROJECT_KNOWLEDGE_PROCESS_EMBEDDINGS = if ($LocalEmbeddingFallback) { 'true' } else { 'false' }
   $node = (Get-Command node -ErrorAction Stop).Source
   $entrypoint = Join-Path $connectorRoot 'dist\sync-project.js'
@@ -30,7 +36,9 @@ try {
   }
 } finally {
   $env:PROJECT_KNOWLEDGE_PROJECT_KEY = $previousProjectKey
+  $env:PROJECT_KNOWLEDGE_PROJECT_NAME = $previousProjectName
   $env:PROJECT_KNOWLEDGE_REPOSITORY_PATH = $previousRepositoryPath
+  $env:PROJECT_KNOWLEDGE_VAULT_PATH = $previousVaultPath
   $env:PROJECT_KNOWLEDGE_PROCESS_EMBEDDINGS = $previousEmbeddingMode
   Pop-Location
 }
