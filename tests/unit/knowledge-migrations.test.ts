@@ -105,7 +105,12 @@ describe('project knowledge migrations', () => {
     );
     expect(migration!.sql).toContain("date_trunc('hour', started_at, 'UTC')");
     expect(migration!.sql).toContain('tool_calls_started');
-    expect(knowledgeMigrations.at(-1)?.id).toBe('0011_embedding_cache');
+    expect(knowledgeMigrations.at(-1)?.id).toBe(
+      '0012_outbox_parent_job_index',
+    );
+    expect(knowledgeMigrations.at(-1)?.sql).toContain(
+      'outbox_jobs(parent_job_id)',
+    );
   });
 
   it('skips an applied migration only when its checksum matches', async () => {

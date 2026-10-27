@@ -701,4 +701,11 @@ END
 $grant$;
 `,
   },
+  {
+    id: '0012_outbox_parent_job_index',
+    sql: String.raw`
+CREATE INDEX IF NOT EXISTS outbox_jobs_parent_job
+  ON project_knowledge.outbox_jobs(parent_job_id) WHERE parent_job_id IS NOT NULL;
+`,
+  },
 ];
