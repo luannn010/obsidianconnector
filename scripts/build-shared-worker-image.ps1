@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $docker = (Get-Command docker.exe -ErrorAction Stop).Source
-$inputs = @('package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.build.json', 'src', 'services/queue-worker/Dockerfile')
+$inputs = @('package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.build.json', 'src', 'services/queue-worker/Dockerfile', 'services/queue-worker/strip-local-deps.mjs')
 $files = foreach ($input in $inputs) {
   $full = Join-Path $repoRoot $input
   if (Test-Path -LiteralPath $full -PathType Container) { Get-ChildItem -LiteralPath $full -File -Recurse } else { Get-Item -LiteralPath $full }
