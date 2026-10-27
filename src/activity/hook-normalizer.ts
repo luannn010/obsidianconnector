@@ -43,7 +43,12 @@ const EXCLUDED_PARTS = new Set([
 export function deriveTaskName(prompt: string): string {
   const firstLine = prompt
     .split(/\r?\n/u)
-    .map((line) => line.trim().replace(/\s+/gu, ' '))
+    .map((line) =>
+      line
+        .replace(/<[^>]*>/gu, '')
+        .trim()
+        .replace(/\s+/gu, ' '),
+    )
     .find(Boolean);
   return (firstLine || 'Untitled task').slice(0, 120);
 }

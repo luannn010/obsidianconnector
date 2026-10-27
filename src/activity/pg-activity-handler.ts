@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { PgPoolLike } from '../knowledge/pg-store.js';
+import type { KnowledgeStore } from '../knowledge/types.js';
 import { fingerprintWorktree } from '../worker/git-worktree.js';
 import {
   shouldRecordActivityPath,
@@ -69,7 +70,117 @@ export class PgActivityHandler implements ActivityRequestHandler {
   constructor(
     private readonly pool: PgPoolLike,
     private readonly resolver: ActivityWorktreeResolver = defaultResolver,
+    private readonly knowledge?: Pick<KnowledgeStore, 'writeProjectKnowledge'>,
   ) {}
+
+  private readonly pendingHandoffs = new Set<Promise<void>>();
+
+  async flushHandoffs(): Promise<void> {
+    await Promise.all([...this.pendingHandoffs]);
+  }
+
+  private async writeHandoff(input: {
+    projectId: string;
+    projectKey: string;
+    agent: ActivityAgent;
+    sessionId: string;
+    taskId: string;
+  }): Promise<void> {
+    if (!this.knowledge) return;
+    const summary = (
+      await this.pool.query<{
+        task_name: string;
+        status: string;
+        branch: string | null;
+        changed_files: string[] | null;
+        changed_count: string | number;
+        stale_refs: string[] | null;
+      }>(
+        `SELECT t.task_name, t.status, w.branch,
+           changed.files AS changed_files, changed.total AS changed_count,
+           stale.refs AS stale_refs
+         FROM project_knowledge.agent_tasks t
+         JOIN project_knowledge.worktrees w ON w.id=t.worktree_id
+         LEFT JOIN LATERAL (
+           SELECT (array_agg(f.repo_relative_path ORDER BY f.last_access_at DESC))[1:20] AS files,
+                  count(*) AS total
+           FROM project_knowledge.task_file_rollups f
+           WHERE f.task_id=t.id AND f.changed_by_task
+         ) changed ON true
+         LEFT JOIN LATERAL (
+           SELECT array_agg(DISTINCT 'knowledge:'||i.id||':v'||i.current_version) AS refs
+           FROM project_knowledge.task_file_rollups f
+           JOIN project_knowledge.source_evidence e ON e.project_id=t.project_id
+             AND e.source_path=f.repo_relative_path AND e.required
+           JOIN project_knowledge.knowledge_items i ON i.id=e.item_id
+           JOIN project_knowledge.source_snapshots active_snapshot
+             ON active_snapshot.worktree_id=t.worktree_id AND active_snapshot.state='active'
+           LEFT JOIN project_knowledge.documentation_freshness df
+             ON df.item_id=e.item_id AND df.knowledge_version_id=e.knowledge_version_id
+             AND df.worktree_id=t.worktree_id AND df.snapshot_id=active_snapshot.id
+           WHERE f.task_id=t.id AND f.changed_by_task
+             AND COALESCE(df.state,'unverified') <> 'current'
+         ) stale ON true
+         WHERE t.id=$1`,
+        [input.taskId],
+      )
+    ).rows[0];
+    const changedFiles = summary?.changed_files ?? [];
+    if (!summary || !changedFiles.length) return;
+    const moreFiles = Number(summary.changed_count) - changedFiles.length;
+    const staleRefs = (summary.stale_refs ?? []).slice(0, 10);
+    const bodyMarkdown = [
+      `Agent: ${input.agent} · Session: ${input.sessionId} · Branch: ${summary.branch ?? 'unknown'} · Status: ${summary.status}`,
+      '',
+      '## Changed files',
+      ...changedFiles.map((file) => `- ${file}`),
+      ...(moreFiles > 0 ? [`- … and ${moreFiles} more`] : []),
+      ...(staleRefs.length
+        ? ['', '## Stale documentation', ...staleRefs.map((ref) => `- ${ref}`)]
+        : []),
+    ].join('\n');
+    const stableKey = `handoff:${input.agent}:${input.sessionId}`;
+    const existing = (
+      await this.pool.query<{ id: string }>(
+        `SELECT id FROM project_knowledge.knowledge_items
+         WHERE project_id=$1 AND stable_key=$2`,
+        [input.projectId, stableKey],
+      )
+    ).rows[0];
+    const taskName =
+      summary.task_name.replace(/<[^>]*>/gu, '').trim() || 'Untitled task';
+    const title = `Handoff from ${input.agent}: ${taskName}`.slice(0, 160);
+    const deliveryStatus =
+      summary.status === 'completed' ? 'completed' : 'active';
+    await this.knowledge.writeProjectKnowledge({
+      projectKey: input.projectKey,
+      actor: input.agent,
+      taskId: input.sessionId,
+      message: title,
+      reason: 'progress',
+      idempotencyKey: `${stableKey}:${createHash('sha256')
+        .update(`${title}\n${deliveryStatus}\n${bodyMarkdown}`)
+        .digest('hex')
+        .slice(0, 16)}`,
+      changes: [
+        existing
+          ? {
+              operation: 'patch',
+              item: { id: existing.id, title, bodyMarkdown, deliveryStatus },
+            }
+          : {
+              operation: 'create',
+              item: {
+                kind: 'handoff',
+                stableKey,
+                title,
+                bodyMarkdown,
+                deliveryStatus,
+              },
+            },
+      ],
+    });
+  }
 
   private async resolveProject(
     root: string,
@@ -270,6 +381,28 @@ export class PgActivityHandler implements ActivityRequestHandler {
         );
       }
       await client.query('COMMIT');
+      if (
+        input.lifecycle === 'session_end' ||
+        (input.lifecycle === 'stop' && !input.stopHookActive)
+      ) {
+        const pending = this.writeHandoff({
+          projectId: project.project_id,
+          projectKey: input.projectKey?.trim() || project.project_key,
+          agent: input.agent,
+          sessionId: input.sessionId,
+          taskId: task.id,
+        })
+          .catch((error: unknown) =>
+            console.error(
+              JSON.stringify({
+                event: 'activity_handoff_failed',
+                message: error instanceof Error ? error.message : String(error),
+              }),
+            ),
+          )
+          .finally(() => this.pendingHandoffs.delete(pending));
+        this.pendingHandoffs.add(pending);
+      }
       return { accepted, ignored };
     } catch (error) {
       await client.query('ROLLBACK');

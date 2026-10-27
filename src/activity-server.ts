@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Pool } from 'pg';
 import { loadDotEnv } from './config/registry.js';
 import { getRuntimeConfig } from './knowledge/config.js';
+import { PgKnowledgeStore, type PgPoolLike } from './knowledge/pg-store.js';
 import { createActivityHttpServer } from './activity/http-server.js';
 import { PgActivityHandler } from './activity/pg-activity-handler.js';
 import { drainActivitySpool } from './activity/spool.js';
@@ -24,7 +25,11 @@ const pool = new Pool({
   statement_timeout: runtime.statementTimeoutMs,
   application_name: 'obsidian-local-activity',
 });
-const handler = new PgActivityHandler(pool);
+const handler = new PgActivityHandler(
+  pool,
+  undefined,
+  new PgKnowledgeStore(pool as unknown as PgPoolLike),
+);
 const spoolPath =
   runtime.activitySpoolPath ??
   path.join(
@@ -80,6 +85,7 @@ async function stop(): Promise<void> {
   await new Promise<void>((resolve, reject) =>
     server.close((error) => (error ? reject(error) : resolve())),
   );
+  await handler.flushHandoffs();
   await pool.end();
 }
 
