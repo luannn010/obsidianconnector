@@ -89,3 +89,17 @@ The routine profile also contains `recall_project_knowledge`,
 `preview_project_views`, and `materialize_project_views`. The older snapshot,
 search, expand, finalize, and sync-action tools remain for compatibility.
 Vault/file tools are admin-only.
+
+## Cross-agent handoff
+
+Claude Code and Codex share this knowledge store. At session start the activity
+hook may add a "Cross-agent handoff" block to context listing the other agent's
+recent tasks on this worktree, the files they changed, stale documentation refs,
+and open blockers.
+
+- Before editing a file listed there, call `recall_project_knowledge` with
+  intent `catch_up` once and expand only the refs you need.
+- Treat listed stale documentation refs as follow-up work for this session when
+  you touch the same files.
+- Record decisions, gotchas, and conventions with `write_project_knowledge` so
+  the other agent receives them instead of rediscovering them.

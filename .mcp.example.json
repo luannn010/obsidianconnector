@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "obsidian-local": {
+      "type": "stdio",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-NoLogo",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "ABSOLUTE_PATH_TO_PROJECT\\scripts\\run-obsidian-local.ps1",
+        "-RepositoryPath",
+        "ABSOLUTE_PATH_TO_PROJECT"
+      ],
+      "env": {
+        "OBSIDIAN_MCP_PROFILE": "standard",
+        "OBSIDIAN_VAULT_ROOT": "ABSOLUTE_PATH_TO_VAULT_ROOT",
+        "OBSIDIAN_MCP_CONFIG": "ABSOLUTE_PATH_TO_PROJECT\\config\\vaults.json"
+      }
+    }
+  }
+}

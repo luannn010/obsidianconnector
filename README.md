@@ -315,6 +315,14 @@ codex mcp add obsidian-local -- node ABSOLUTE_PATH_TO_PROJECT/dist/index.js
 
 If the path contains spaces, quote the executable argument as required by your shell or Codex CLI version.
 
+## Claude Code
+
+Copy `.mcp.example.json` to `.mcp.json` (ignored by Git) and replace the
+`ABSOLUTE_PATH_*` placeholders. It launches `scripts/run-obsidian-local.ps1`
+with the system `powershell.exe`, which loads the shared project-knowledge
+environment before starting `dist/index.js`. Both agents read the same rules
+from `AGENTS.md`; `CLAUDE.md` imports it.
+
 ## Codex IDE
 
 Use the IDE's MCP server configuration and select a local STDIO server. Set the command to `node`, set the argument to the absolute path ending in `dist/index.js`, and set `OBSIDIAN_MCP_CONFIG` in the server environment if the registry is not at `config/vaults.json`. Restart the IDE after changing the server configuration.

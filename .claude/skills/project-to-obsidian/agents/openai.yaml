@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Project to Obsidian'
+  short_description: 'Turn project chats into organized Obsidian notes'
+  default_prompt: 'Use $project-to-obsidian to organize this project discussion into its Obsidian vault.'
