@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { embeddingHash } from '../../src/knowledge/embed-text.js';
 import {
   appendIndexablePreviousDirtyPaths,
   clearChangedSnapshotRows,
+  SOURCE_PARSER_REVISION,
+  sourceChunkEmbeddingPolicy,
 } from '../../src/worker/knowledge-worker.js';
 
 describe('snapshot changed-file cleanup', () => {
@@ -41,5 +44,27 @@ describe('snapshot changed-file cleanup', () => {
       { status: 'A', path: 'src/current.ts' },
       { status: 'M', path: 'src/previous.ts' },
     ]);
+  });
+
+  it('applies the structural-v3 embedding policy and worktree priority penalty', () => {
+    expect(SOURCE_PARSER_REVISION).toBe('structural-v3');
+    expect(
+      sourceChunkEmbeddingPolicy('symbol', 'function local() {}', true),
+    ).toEqual({ embedHash: null, priority: null });
+    expect(
+      sourceChunkEmbeddingPolicy('documentation', '# Guide', true),
+    ).toEqual({ embedHash: embeddingHash('# Guide'), priority: 50 });
+    expect(
+      sourceChunkEmbeddingPolicy('documentation', '# Guide', false),
+    ).toMatchObject({ priority: 30 });
+    expect(
+      sourceChunkEmbeddingPolicy('api_endpoint', 'GET /health', true),
+    ).toMatchObject({ priority: 40 });
+    expect(
+      sourceChunkEmbeddingPolicy('database_table', 'CREATE TABLE jobs', true),
+    ).toMatchObject({ priority: 40 });
+    expect(
+      sourceChunkEmbeddingPolicy('file_summary', 'src/jobs.ts', true),
+    ).toMatchObject({ priority: 30 });
   });
 });

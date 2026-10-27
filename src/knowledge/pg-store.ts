@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Pool, type QueryResultRow } from 'pg';
 import { canonicalHash } from './hash.js';
 import { CachingEmbeddingProvider } from './embedding-cache.js';
-import type { EmbeddingModelKeyInput } from './embed-text.js';
+import { embeddingHash, type EmbeddingModelKeyInput } from './embed-text.js';
 import { KnowledgeError } from './errors.js';
 import {
   countSerializedTokens,
@@ -663,21 +663,26 @@ export class PgKnowledgeStore implements KnowledgeStore {
         const sql = embedding
           ? `
           WITH bm25 AS MATERIALIZED (
-            SELECT id, row_number() OVER (ORDER BY paradedb.score(id) DESC) AS rank
-            FROM project_knowledge.search_chunks WHERE content @@@ $3 AND project_id = $1 AND active
-              AND ($2::uuid IS NULL OR snapshot_id IS NULL OR snapshot_id=$2)
-              AND ($10::uuid IS NULL OR worktree_id IS NULL OR worktree_id=$10)
-              AND ($6::text[] IS NULL OR kind=ANY($6)) AND ($7::text[] IS NULL OR domain=ANY($7))
-              AND ($8::text[] IS NULL OR service=ANY($8)) LIMIT $4
+            SELECT c.id, row_number() OVER (ORDER BY paradedb.score(c.id) DESC) AS rank
+            FROM project_knowledge.search_chunks c
+            LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
+            WHERE c.content @@@ $3 AND c.project_id = $1 AND c.active
+              AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$2)
+              AND ($2::uuid IS NOT NULL OR c.snapshot_id IS NULL OR s.state='active')
+              AND ($10::uuid IS NULL OR c.worktree_id IS NULL OR c.worktree_id=$10)
+              AND ($6::text[] IS NULL OR c.kind=ANY($6)) AND ($7::text[] IS NULL OR c.domain=ANY($7))
+              AND ($8::text[] IS NULL OR c.service=ANY($8)) LIMIT $4
           ), vector AS (
-            SELECT id, row_number() OVER (ORDER BY embedding <=> $5::vector) AS rank
-            FROM project_knowledge.search_chunks
-            WHERE project_id = $1 AND active AND embedding IS NOT NULL
-              AND ($2::uuid IS NULL OR snapshot_id IS NULL OR snapshot_id=$2)
-              AND ($10::uuid IS NULL OR worktree_id IS NULL OR worktree_id=$10)
-              AND ($6::text[] IS NULL OR kind=ANY($6)) AND ($7::text[] IS NULL OR domain=ANY($7))
-              AND ($8::text[] IS NULL OR service=ANY($8))
-            ORDER BY embedding <=> $5::vector LIMIT $4
+            SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> $5::vector) AS rank
+            FROM project_knowledge.search_chunks c
+            LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
+            WHERE c.project_id = $1 AND c.active AND c.embedding IS NOT NULL
+              AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$2)
+              AND ($2::uuid IS NOT NULL OR c.snapshot_id IS NULL OR s.state='active')
+              AND ($10::uuid IS NULL OR c.worktree_id IS NULL OR c.worktree_id=$10)
+              AND ($6::text[] IS NULL OR c.kind=ANY($6)) AND ($7::text[] IS NULL OR c.domain=ANY($7))
+              AND ($8::text[] IS NULL OR c.service=ANY($8))
+            ORDER BY c.embedding <=> $5::vector LIMIT $4
           )
           SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata,
                  c.item_id, i.current_version AS item_version, i.stable_key,
@@ -702,12 +707,14 @@ export class PgKnowledgeStore implements KnowledgeStore {
         `
           : `
           WITH bm25 AS MATERIALIZED (
-            SELECT id,paradedb.score(id) AS score FROM project_knowledge.search_chunks
-            WHERE content @@@ $3 AND project_id=$1 AND active
-              AND ($2::uuid IS NULL OR snapshot_id IS NULL OR snapshot_id=$2)
-              AND ($10::uuid IS NULL OR worktree_id IS NULL OR worktree_id=$10)
-              AND ($6::text[] IS NULL OR kind=ANY($6)) AND ($7::text[] IS NULL OR domain=ANY($7))
-              AND ($8::text[] IS NULL OR service=ANY($8))
+            SELECT c.id,paradedb.score(c.id) AS score FROM project_knowledge.search_chunks c
+            LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
+            WHERE c.content @@@ $3 AND c.project_id=$1 AND c.active
+              AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id=$2)
+              AND ($2::uuid IS NOT NULL OR c.snapshot_id IS NULL OR s.state='active')
+              AND ($10::uuid IS NULL OR c.worktree_id IS NULL OR c.worktree_id=$10)
+              AND ($6::text[] IS NULL OR c.kind=ANY($6)) AND ($7::text[] IS NULL OR c.domain=ANY($7))
+              AND ($8::text[] IS NULL OR c.service=ANY($8))
             ORDER BY score DESC LIMIT $4 OFFSET ${offset}
           )
           SELECT c.id, c.kind, c.title, c.content, c.content_hash, c.metadata,
@@ -1554,10 +1561,11 @@ export class PgKnowledgeStore implements KnowledgeStore {
       [projectId, itemId],
     );
     const chunkId = randomUUID();
+    const chunkContent = `${title}\n\n${bodyMarkdown}`;
     await client.query(
       `INSERT INTO project_knowledge.search_chunks
-      (id,project_id,item_id,kind,domain,service,title,content,content_hash,token_count,metadata)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      (id,project_id,item_id,kind,domain,service,title,content,content_hash,token_count,embed_hash,metadata)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         chunkId,
         projectId,
@@ -1566,9 +1574,10 @@ export class PgKnowledgeStore implements KnowledgeStore {
         record.domain,
         record.service,
         title,
-        `${title}\n\n${bodyMarkdown}`,
+        chunkContent,
         hash,
-        countSerializedTokens(`${title}\n\n${bodyMarkdown}`),
+        countSerializedTokens(chunkContent),
+        embeddingHash(chunkContent),
         {
           citation: `knowledge:${itemId}:v${version}`,
           itemVersion: version,
@@ -1578,10 +1587,10 @@ export class PgKnowledgeStore implements KnowledgeStore {
     );
     await client.query(
       `INSERT INTO project_knowledge.outbox_jobs
-        (project_id,job_type,job_key,required_capability,payload)
-      VALUES($1,'embed_chunk',$2,'embedding',$3)
+        (project_id,job_type,job_key,required_capability,priority,payload)
+      VALUES($1,'embed_chunk',$2,'embedding',$3,$4)
       ON CONFLICT DO NOTHING`,
-      [projectId, `embed:${chunkId}`, { chunkId }],
+      [projectId, `embed:${chunkId}`, 100, { chunkId }],
     );
     if (change.operation === 'supersede' && change.supersedesId) {
       await client.query(
