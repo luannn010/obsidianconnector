@@ -8,7 +8,7 @@ import {
   type NormalizedActivityEvent,
   type NormalizedHookPayload,
 } from './hook-normalizer.js';
-import type { ActivityRequestHandler } from './http-server.js';
+import type { ActivityHandoff, ActivityRequestHandler } from './http-server.js';
 
 export interface ActivityWorktreeFingerprint {
   root: string;
@@ -240,6 +240,84 @@ export class PgActivityHandler implements ActivityRequestHandler {
     } finally {
       client.release();
     }
+  }
+
+  async handoff(input: {
+    projectKey: string;
+    agent: string;
+    cwd: string;
+  }): Promise<ActivityHandoff> {
+    const fingerprint = await this.resolver.resolve(input.cwd);
+    const otherAgent = input.agent === 'codex' ? 'claude' : 'codex';
+    const tasks = await this.pool.query<{
+      agent: ActivityAgent;
+      task_name: string;
+      status: string;
+      last_seen_at: Date | string;
+      branch: string | null;
+      changed_files: string[] | null;
+      changed_count: string | number;
+      stale_refs: string[] | null;
+    }>(
+      `SELECT t.agent, t.task_name, t.status, t.last_seen_at, w.branch,
+         changed.files AS changed_files, changed.total AS changed_count,
+         stale.refs AS stale_refs
+       FROM project_knowledge.projects p
+       JOIN project_knowledge.agent_tasks t ON t.project_id=p.project_id
+       JOIN project_knowledge.worktrees w ON w.id=t.worktree_id
+       LEFT JOIN LATERAL (
+         SELECT (array_agg(f.repo_relative_path ORDER BY f.last_access_at DESC))[1:8] AS files,
+                count(*) AS total
+         FROM project_knowledge.task_file_rollups f
+         WHERE f.task_id=t.id AND f.changed_by_task
+       ) changed ON true
+       LEFT JOIN LATERAL (
+         SELECT array_agg(DISTINCT 'knowledge:'||i.id||':v'||i.current_version) AS refs
+         FROM project_knowledge.task_file_rollups f
+         JOIN project_knowledge.source_evidence e ON e.project_id=p.project_id
+           AND e.source_path=f.repo_relative_path AND e.required
+         JOIN project_knowledge.knowledge_items i ON i.id=e.item_id
+         JOIN project_knowledge.source_snapshots active_snapshot
+           ON active_snapshot.worktree_id=t.worktree_id AND active_snapshot.state='active'
+         LEFT JOIN project_knowledge.documentation_freshness df
+           ON df.item_id=e.item_id AND df.knowledge_version_id=e.knowledge_version_id
+           AND df.worktree_id=t.worktree_id AND df.snapshot_id=active_snapshot.id
+         WHERE f.task_id=t.id AND f.changed_by_task
+           AND COALESCE(df.state,'unverified') <> 'current'
+       ) stale ON true
+       WHERE p.project_key=$1 AND t.agent=$2 AND lower(w.path)=lower($3)
+         AND t.last_seen_at > now() - interval '7 days'
+         AND (t.status='active' OR changed.total > 0)
+       ORDER BY t.last_seen_at DESC LIMIT 3`,
+      [input.projectKey, otherAgent, path.resolve(fingerprint.root)],
+    );
+    const blockers = await this.pool.query<{ title: string }>(
+      `SELECT i.title FROM project_knowledge.knowledge_items i
+       JOIN project_knowledge.projects p ON p.project_id=i.project_id
+       WHERE p.project_key=$1 AND i.kind='blocker' AND i.superseded_by IS NULL
+         AND COALESCE(i.delivery_status,'open') NOT IN ('completed','resolved','cancelled')
+       ORDER BY i.updated_at DESC LIMIT 3`,
+      [input.projectKey],
+    );
+    return {
+      tasks: tasks.rows.map((row) => {
+        const changedFiles = row.changed_files ?? [];
+        return {
+          agent: row.agent,
+          taskName: row.task_name,
+          status: row.status,
+          lastSeenAt: new Date(row.last_seen_at).toISOString(),
+          ...(row.branch ? { branch: row.branch } : {}),
+          changedFiles,
+          moreFiles: Math.max(
+            0,
+            Number(row.changed_count) - changedFiles.length,
+          ),
+          staleRefs: (row.stale_refs ?? []).slice(0, 5),
+        };
+      }),
+      blockers: blockers.rows.map((row) => row.title),
+    };
   }
 
   async gate(input: {

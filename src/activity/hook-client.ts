@@ -6,11 +6,45 @@ import {
   type ActivityAgent,
   type NormalizedHookPayload,
 } from './hook-normalizer.js';
+import type { ActivityHandoff } from './http-server.js';
 
 export interface ActivityHookResult {
   blocked: boolean;
   refs: string[];
   spooled: boolean;
+  context?: string;
+}
+
+const HANDOFF_CONTEXT_LIMIT = 1600;
+
+export function formatHandoffContext(
+  handoff: ActivityHandoff,
+): string | undefined {
+  if (!handoff.tasks.length && !handoff.blockers.length) return undefined;
+  const lines = ['Cross-agent handoff (project knowledge activity):'];
+  for (const task of handoff.tasks) {
+    const branch = task.branch ? ` on ${task.branch}` : '';
+    const name =
+      task.taskName.replace(/<[^>]*>/gu, '').trim() || 'Untitled task';
+    lines.push(
+      `- ${task.agent} [${task.status}, ${task.lastSeenAt.slice(0, 16).replace('T', ' ')}Z${branch}]: ${name.slice(0, 100)}`,
+    );
+    if (task.changedFiles.length) {
+      const more = task.moreFiles ? ` (+${task.moreFiles} more)` : '';
+      lines.push(`  changed: ${task.changedFiles.join(', ')}${more}`);
+    }
+    if (task.staleRefs.length)
+      lines.push(`  stale docs: ${task.staleRefs.join(', ')}`);
+  }
+  if (handoff.blockers.length)
+    lines.push(`Open blockers: ${handoff.blockers.join('; ')}`);
+  lines.push(
+    'Call recall_project_knowledge (intent catch_up) before changing these files.',
+  );
+  const text = lines.join('\n');
+  return text.length <= HANDOFF_CONTEXT_LIMIT
+    ? text
+    : `${text.slice(0, HANDOFF_CONTEXT_LIMIT - 1)}…`;
 }
 
 export interface RunActivityHookOptions {
@@ -58,6 +92,37 @@ export async function appendActivitySpool(
   );
 }
 
+async function fetchHandoffContext(
+  options: RunActivityHookOptions,
+  cwd: string,
+  fetchImpl: typeof fetch,
+  headers: Record<string, string>,
+): Promise<string | undefined> {
+  try {
+    const response = await fetchImpl(
+      `${options.baseUrl.replace(/\/$/u, '')}/v1/handoff`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          projectKey: options.projectKey,
+          agent: options.agent,
+          cwd,
+        }),
+        signal: AbortSignal.timeout(1200),
+      },
+    );
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as Partial<ActivityHandoff>;
+    return formatHandoffContext({
+      tasks: Array.isArray(body.tasks) ? body.tasks.slice(0, 3) : [],
+      blockers: Array.isArray(body.blockers) ? body.blockers.slice(0, 3) : [],
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runActivityHook(
   options: RunActivityHookOptions,
 ): Promise<ActivityHookResult> {
@@ -87,6 +152,14 @@ export async function runActivityHook(
   } catch {
     await spool(normalized);
     spooled = true;
+  }
+  if (normalized.lifecycle === 'session_start') {
+    const context = spooled
+      ? undefined
+      : await fetchHandoffContext(options, normalized.cwd, fetchImpl, headers);
+    return context
+      ? { blocked: false, refs: [], spooled, context }
+      : { blocked: false, refs: [], spooled };
   }
   if (normalized.lifecycle !== 'stop' || normalized.stopHookActive)
     return { blocked: false, refs: [], spooled };

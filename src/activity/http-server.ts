@@ -11,6 +11,27 @@ export interface ActivityRequestHandler {
     agent: string;
     sessionId: string;
   }): Promise<{ blocked: boolean; refs: string[] }>;
+  handoff?(input: {
+    projectKey: string;
+    agent: string;
+    cwd: string;
+  }): Promise<ActivityHandoff>;
+}
+
+export interface ActivityHandoffTask {
+  agent: 'codex' | 'claude';
+  taskName: string;
+  status: string;
+  lastSeenAt: string;
+  branch?: string;
+  changedFiles: string[];
+  moreFiles: number;
+  staleRefs: string[];
+}
+
+export interface ActivityHandoff {
+  tasks: ActivityHandoffTask[];
+  blockers: string[];
 }
 
 export interface ActivityHttpServerOptions {
@@ -53,6 +74,32 @@ export function createActivityHttpServer(options: ActivityHttpServerOptions) {
         await options.handler.record(await readJson(request));
         response.statusCode = 202;
         response.end();
+        return;
+      }
+      if (
+        request.method === 'POST' &&
+        url.pathname === '/v1/handoff' &&
+        options.handler.handoff
+      ) {
+        const body = (await readJson(request)) as Record<string, unknown>;
+        if (
+          (body.agent !== 'codex' && body.agent !== 'claude') ||
+          typeof body.cwd !== 'string' ||
+          !body.cwd.trim()
+        )
+          throw new Error('Invalid handoff request');
+        json(
+          response,
+          200,
+          await options.handler.handoff({
+            projectKey:
+              typeof body.projectKey === 'string' && body.projectKey.trim()
+                ? body.projectKey.trim()
+                : 'MC-Platform',
+            agent: body.agent,
+            cwd: body.cwd,
+          }),
+        );
         return;
       }
       const gate = url.pathname.match(
