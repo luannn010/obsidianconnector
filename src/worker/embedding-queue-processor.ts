@@ -159,7 +159,7 @@ export class EmbeddingQueueProcessor {
          ), model_rows AS (
            INSERT INTO project_knowledge.embedding_models
              (project_id,model_name,model_revision,dimensions,active)
-           SELECT DISTINCT project_id,$1,$2,$3,true FROM cache_candidates
+           SELECT DISTINCT project_id,$1::text,$2::text,$3::int,true FROM cache_candidates
            ON CONFLICT(project_id,model_name,model_revision)
            DO UPDATE SET dimensions=EXCLUDED.dimensions,active=true
            RETURNING id,project_id
