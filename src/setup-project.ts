@@ -1,3 +1,4 @@
+import { scaffoldIdeaWorkspace } from './ideas/idea-workspace.js';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -235,6 +236,12 @@ async function runSetup(
     identity.vaultName,
     name,
   );
+  const ideaWorkspace = await scaffoldIdeaWorkspace(
+    registry,
+    files,
+    identity.vaultName,
+    { projectKey, repositoryPath: portable.projectPath },
+  );
   const git = await ensureGitHead(portable.projectPath);
   const fingerprint = await fingerprintWorktree(portable.projectPath);
 
@@ -280,6 +287,7 @@ async function runSetup(
       git,
       configuration: projectConfiguration.files,
       starterNotes,
+      ideaWorkspace,
     };
   } finally {
     await pool.end();

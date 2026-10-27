@@ -1,0 +1,9 @@
+{
+  "id": "project-board",
+  "name": "Project Board",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.2",
+  "description": "Ideas board, card panel, and prototype gallery for ObsidianConnector project vaults.",
+  "author": "Luan Nguyen",
+  "isDesktopOnly": true
+}

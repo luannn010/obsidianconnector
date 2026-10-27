@@ -20,11 +20,17 @@ import type {
   ProjectSyncActionRunner,
 } from './knowledge/types.js';
 import { registerKnowledgeTools } from './tools/knowledge-tools.js';
+import { registerIdeaTools } from './tools/idea-tools.js';
+import {
+  IdeaWorkspace,
+  type IdeaProjectResolver,
+} from './ideas/idea-workspace.js';
 
 export interface ServerOptions {
   profile?: 'standard' | 'admin';
   knowledge?: KnowledgeStore;
   syncActions?: ProjectSyncActionRunner;
+  ideaProjects?: IdeaProjectResolver;
   metrics?: MetricsSink;
   metricsModule?: MetricsModule | null;
 }
@@ -54,9 +60,14 @@ export function createServer(
         ? loadMetricsModule()
         : options.metricsModule;
     if (metricsModule) {
-      metricsModule.instrumentServer(server, options.metrics, 'obsidian-local', {
-        extractProjectKey: metricsModule.stringField('projectKey'),
-      });
+      metricsModule.instrumentServer(
+        server,
+        options.metrics,
+        'obsidian-local',
+        {
+          extractProjectKey: metricsModule.stringField('projectKey'),
+        },
+      );
     }
   }
   if (options.profile === 'standard') {
@@ -66,6 +77,16 @@ export function createServer(
       );
     }
     registerKnowledgeTools(server, options.knowledge, options.syncActions);
+    if (options.ideaProjects)
+      registerIdeaTools(
+        server,
+        new IdeaWorkspace(
+          registry,
+          files,
+          options.ideaProjects,
+          options.knowledge,
+        ),
+      );
     return server;
   }
   registerVaultTools(server, context);

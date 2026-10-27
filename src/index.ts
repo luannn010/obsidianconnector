@@ -7,6 +7,7 @@ import {
   VaultRegistry,
 } from './config/registry.js';
 import { createServer } from './server.js';
+import { PgIdeaProjectResolver } from './ideas/idea-workspace.js';
 import { loadMetricsModule } from './metrics-loader.js';
 import { getRuntimeConfig } from './knowledge/config.js';
 import {
@@ -80,6 +81,7 @@ export async function main(): Promise<void> {
     ...(database
       ? {
           knowledge: database.store,
+          ideaProjects: new PgIdeaProjectResolver(database.pool),
           syncActions: new ProjectSyncActionsService(database.pool, {
             projectName: process.env.PROJECT_KNOWLEDGE_PROJECT_NAME?.trim(),
             ...(embedder ? { embedder } : {}),

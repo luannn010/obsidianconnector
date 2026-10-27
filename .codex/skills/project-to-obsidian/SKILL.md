@@ -103,3 +103,44 @@ and open blockers.
   you touch the same files.
 - Record decisions, gotchas, and conventions with `write_project_knowledge` so
   the other agent receives them instead of rediscovering them.
+
+## Ideas board
+
+Each project vault has `Ideas.md` (one `- ` bullet per idea), a board at
+`Board/Board.md`, a prototype gallery at `Board/Prototypes.md`, and one folder
+per card at `Board/Cards/<slug>/` (`card.md`, `plan.md`, `prototypes/`,
+`prompts/`). Columns are `backlog`, `planning`, `plan-review`, `ready`,
+`building`, `review`, `done`. Codex plans cards; Claude builds approved ones.
+Change cards only through the idea tools so the board, `Ideas.md`, and the
+card's `work_item` stay in step.
+
+**Triage ideas** ("triage my ideas for <project>"):
+
+1. Call `list_project_ideas` once.
+2. Refine each idea: merge duplicates (one card, several `ideaRefs`), split
+   oversized ideas, write a short problem, a proposal, and testable acceptance
+   criteria. Ask the user only when an idea is too vague to scope.
+3. Call `create_idea_cards` once with a stable `idempotencyKey`. Report the
+   created cards and any warnings.
+
+**Plan a card (Codex)**, started from the board with
+`Board/Cards/<slug>/prompts/plan.md`:
+
+1. Read `card.md`, the prompt file, and any `review_note`; orient with
+   `recall_project_knowledge` before reading code.
+2. Write the plan (context, steps, files, risks, verification) with
+   `attach_card_artifact` type `plan`.
+3. Build each type in `prototypes_requested`:
+   - `html`: one self-contained file, inline CSS and JS, no network requests.
+   - `diagram`: Mermaid (`diagramFormat: mermaid`) or SVG.
+   - `spike`: a `git worktree` on `spike/<slug>` with the smallest working
+     code; attach it with `branch`. Never commit spikes to the main branch.
+4. Finish with `set_card_status` `plan-review`, `actor: codex`.
+
+**Build a card (Claude)**, started from the board with
+`Board/Cards/<slug>/prompts/build.md`:
+
+1. Follow the approved `plan.md`; record decisions with
+   `write_project_knowledge`.
+2. When the work is verified, call `set_card_status` `review`,
+   `actor: claude`. Leave `done` to the user.
