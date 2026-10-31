@@ -11,10 +11,17 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingProvider {
   ) {}
 
   async embed(text: string): Promise<number[]> {
-    return (await this.embedMany([text]))[0]!;
+    return (await this.request([text], 'interactive'))[0]!;
   }
 
   async embedMany(texts: string[]): Promise<number[][]> {
+    return this.request(texts, 'background');
+  }
+
+  private async request(
+    texts: string[],
+    priority: 'interactive' | 'background',
+  ): Promise<number[][]> {
     if (texts.length === 0) return [];
     const response = await fetch(new URL('/v1/embeddings', this.baseUrl), {
       method: 'POST',
@@ -22,7 +29,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingProvider {
         'content-type': 'application/json',
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
       },
-      body: JSON.stringify({ model: this.model, input: texts }),
+      body: JSON.stringify({ model: this.model, input: texts, priority }),
       signal: AbortSignal.timeout(30_000),
     }).catch(() => undefined);
     if (!response?.ok)
