@@ -48,6 +48,8 @@ try {
   $requestJson = & $node (Join-Path $repoRoot 'dist\request-source-sync.js') --enqueue --project-key $ProjectKey --worktree-path $resolvedWorktree
   if ($LASTEXITCODE -ne 0) { throw 'Could not enqueue source synchronization' }
   $request = $requestJson | ConvertFrom-Json
+  if (-not $request.worktreeId) { throw 'Source synchronization did not resolve a worktree' }
+  $env:PROJECT_KNOWLEDGE_SOURCE_WORKTREE_ID = $request.worktreeId
   $env:PROJECT_KNOWLEDGE_WORKER_IMAGE = $Image
   $env:PROJECT_KNOWLEDGE_WORKER_RELEASE = ($Image -split '@')[-1]
   $env:PROJECT_KNOWLEDGE_QUEUE_ENV_FILE = $runtimeFile
