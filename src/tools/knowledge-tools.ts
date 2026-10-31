@@ -58,7 +58,7 @@ export function registerKnowledgeTools(
     'get_project_snapshot',
     {
       description:
-        'Return a compact, immutable project snapshot. Normally omit maxTokens to use the 800-token default; explicit values must be between 100 and 1600.',
+        'Return an immutable snapshot; omit maxTokens for the 800-token default. Allowed range: 100–1600.',
       inputSchema: {
         projectKey,
         worktreePath: z.string(),
@@ -79,7 +79,7 @@ export function registerKnowledgeTools(
     'recall_project_knowledge',
     {
       description:
-        'Recall compact project knowledge in one call. Pass knownStateHash to receive a not_modified receipt when results are unchanged.',
+        'Recall project knowledge. Pass knownStateHash for a not_modified receipt when unchanged.',
       inputSchema: {
         projectKey,
         intent: z.enum(['orient', 'find', 'verify', 'catch_up']),
@@ -155,7 +155,7 @@ export function registerKnowledgeTools(
   server.registerTool(
     'write_project_knowledge',
     {
-      description: `Write versioned project knowledge. Kind is case-normalized and must be one of: ${KNOWLEDGE_KINDS.join(', ')}, or other:<slug> where slug uses lowercase letters, digits, and hyphens.`,
+      description: `Write versioned knowledge. Case-normalized kinds: ${KNOWLEDGE_KINDS.join(', ')}, or other:<slug> (lowercase letters, digits, hyphens).`,
       inputSchema: {
         projectKey,
         actor: z.string(),
@@ -227,7 +227,7 @@ export function registerKnowledgeTools(
     'preview_project_views',
     {
       description:
-        'Preview which lazy project and worktree notes would change without writing Markdown or returning rendered note bodies.',
+        'Preview changed lazy views without writing or returning Markdown.',
       inputSchema: {
         ...namedViewInputs,
         knownPreviewHash: z.string().length(64).optional(),
@@ -246,8 +246,7 @@ export function registerKnowledgeTools(
   server.registerTool(
     'materialize_project_views',
     {
-      description:
-        'Publish only changed lazy named views after validating an exact preview hash.',
+      description: 'Publish changed lazy views using the exact preview hash.',
       inputSchema: {
         ...namedViewInputs,
         previewHash: z.string().length(64),
@@ -265,7 +264,7 @@ export function registerKnowledgeTools(
     'finalize_projection',
     {
       description:
-        'Finalize pending SQL-backed project knowledge into generated Obsidian Published notes. Blocks on failed jobs, projection conflicts, or non-projection actions.',
+        'Generate Published notes; blocks on failed jobs, projection conflicts, or non-projection actions.',
       inputSchema: {
         projectKey,
         worktreePath: z.string(),
@@ -289,7 +288,7 @@ export function registerKnowledgeTools(
     'run_project_sync_action',
     {
       description:
-        'Run a safe get_project_sync_status suggested action. V1 supports REINDEX_SOURCE and FINALIZE_PROJECTION only; semantic knowledge updates still use write_project_knowledge with chunk refs.',
+        'Run a suggested sync-status action: REINDEX_SOURCE or FINALIZE_PROJECTION. Use write_project_knowledge for semantic changes.',
       inputSchema: {
         projectKey,
         action: z.enum(['REINDEX_SOURCE', 'FINALIZE_PROJECTION']),
@@ -319,7 +318,7 @@ export function registerKnowledgeTools(
     'sync_project_on_demand',
     {
       description:
-        'Run a guarded project synchronization against a clean master worktree. Failed-job repair is fail-closed unless repairFailedJobs=true; publish requires a preview hash.',
+        'Sync a clean master worktree. Failed-job repair requires repairFailedJobs=true; publishing requires a preview hash.',
       inputSchema: {
         projectKey,
         worktreePath: z.string(),

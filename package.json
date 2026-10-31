@@ -29,6 +29,7 @@
     "knowledge:finalize-projection": "tsx src/finalize-projection.ts",
     "knowledge:activity": "tsx src/activity-server.ts",
     "knowledge:hook": "tsx src/activity-hook.ts",
+    "skills:ingest": "tsx src/skills-ingest.ts",
     "activity:doctor": "node dist/activity-doctor.js"
   },
   "dependencies": {

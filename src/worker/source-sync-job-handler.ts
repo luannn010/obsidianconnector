@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import type { EmbeddingModelKeyInput } from '../knowledge/embed-text.js';
 import { fingerprintWorktree } from './git-worktree.js';
 import { KnowledgeWorker, type WorkerProject } from './knowledge-worker.js';
 import type { SharedJob } from './shared-job-queue.js';
@@ -25,6 +26,7 @@ export class SourceSyncJobHandler {
     private readonly projectsHostRoot: string,
     private readonly projectsContainerRoot: string,
     private readonly vaultsContainerRoot: string,
+    private readonly embeddingModel?: EmbeddingModelKeyInput,
   ) {}
 
   async process(job: SharedJob): Promise<SourceSyncResolution> {
@@ -79,12 +81,18 @@ export class SourceSyncJobHandler {
       )
     ).rows[0]!;
     try {
-      const worker = new KnowledgeWorker(this.pool);
+      const worker = new KnowledgeWorker(
+        this.pool,
+        undefined,
+        this.embeddingModel,
+      );
       const source = await worker.reconcile(project, {
         primaryRepositoryPath: target.repository_path,
         parentJobId: job.id,
       });
-      await worker.syncCanonicalDocuments(project);
+      await worker.syncCanonicalDocuments(project, {
+        snapshotId: source.snapshotId,
+      });
       await worker.syncStructuredDocumentation(project);
       await worker.processInbox(project);
       const projection = await worker.publishVault(project);

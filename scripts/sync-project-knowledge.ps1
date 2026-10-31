@@ -28,7 +28,10 @@ if (-not $settings.PROJECT_KNOWLEDGE_DATABASE_URL) { throw 'PROJECT_KNOWLEDGE_DA
 $runtimeLines = @(
   "PROJECT_KNOWLEDGE_DATABASE_URL=$($settings.PROJECT_KNOWLEDGE_DATABASE_URL)",
   'PROJECT_KNOWLEDGE_DB_POOL_MAX=2',
-  'PROJECT_KNOWLEDGE_STATEMENT_TIMEOUT_MS=30000'
+  'PROJECT_KNOWLEDGE_STATEMENT_TIMEOUT_MS=30000',
+  "PROJECT_KNOWLEDGE_EMBEDDING_MODEL=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_MODEL)",
+  "PROJECT_KNOWLEDGE_EMBEDDING_REVISION=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_REVISION)",
+  "PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS)"
 )
 if ($LocalEmbeddingFallback) {
   foreach ($required in @('PROJECT_KNOWLEDGE_EMBEDDING_BASE_URL', 'PROJECT_KNOWLEDGE_EMBEDDING_TOKEN')) {
@@ -36,9 +39,6 @@ if ($LocalEmbeddingFallback) {
   }
   $runtimeLines += "PROJECT_KNOWLEDGE_EMBEDDING_BASE_URL=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_BASE_URL)"
   $runtimeLines += "PROJECT_KNOWLEDGE_EMBEDDING_TOKEN=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_TOKEN)"
-  $runtimeLines += "PROJECT_KNOWLEDGE_EMBEDDING_MODEL=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_MODEL)"
-  $runtimeLines += "PROJECT_KNOWLEDGE_EMBEDDING_REVISION=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_REVISION)"
-  $runtimeLines += "PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS=$($settings.PROJECT_KNOWLEDGE_EMBEDDING_DIMENSIONS)"
 }
 Set-Content -LiteralPath $runtimeFile -Encoding utf8NoBOM -Value $runtimeLines
 Push-Location $repoRoot
@@ -48,6 +48,8 @@ try {
   $requestJson = & $node (Join-Path $repoRoot 'dist\request-source-sync.js') --enqueue --project-key $ProjectKey --worktree-path $resolvedWorktree
   if ($LASTEXITCODE -ne 0) { throw 'Could not enqueue source synchronization' }
   $request = $requestJson | ConvertFrom-Json
+  if (-not $request.worktreeId) { throw 'Source synchronization did not resolve a worktree' }
+  $env:PROJECT_KNOWLEDGE_SOURCE_WORKTREE_ID = $request.worktreeId
   $env:PROJECT_KNOWLEDGE_WORKER_IMAGE = $Image
   $env:PROJECT_KNOWLEDGE_WORKER_RELEASE = ($Image -split '@')[-1]
   $env:PROJECT_KNOWLEDGE_QUEUE_ENV_FILE = $runtimeFile

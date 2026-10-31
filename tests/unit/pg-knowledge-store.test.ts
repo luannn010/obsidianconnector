@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { KnowledgeError } from '../../src/knowledge/errors.js';
 import { canonicalHash } from '../../src/knowledge/hash.js';
 import { embeddingHash } from '../../src/knowledge/embed-text.js';
@@ -18,7 +18,7 @@ class FakeClient {
     this.statements.push(sql);
     if (
       sql.includes('FROM project_knowledge.projects') &&
-      sql.includes('FOR UPDATE')
+      sql.includes('FOR NO KEY UPDATE')
     ) {
       return {
         rows: [{ project_id: 'project-1', db_revision: 3 }] as unknown as Row[],
@@ -45,7 +45,7 @@ class KnowledgeWriteClient extends FakeClient {
     this.queries.push({ sql, values });
     if (
       sql.includes('FROM project_knowledge.projects') &&
-      sql.includes('FOR UPDATE')
+      sql.includes('FOR NO KEY UPDATE')
     )
       return {
         rows: [{ project_id: 'project-1', db_revision: 3 }] as unknown as Row[],
@@ -231,6 +231,11 @@ describe('PostgreSQL knowledge store', () => {
     } satisfies Partial<KnowledgeError>);
 
     expect(client.statements[0]).toBe('BEGIN');
+    expect(
+      client.statements.find((sql) =>
+        sql.includes('SELECT project_id, db_revision'),
+      ),
+    ).toContain('FOR NO KEY UPDATE');
     expect(client.statements.at(-1)).toBe('ROLLBACK');
     expect(client.released).toBe(true);
   });
@@ -343,6 +348,66 @@ describe('PostgreSQL knowledge store', () => {
     expect(embedJob?.sql).toContain('priority');
     expect(embedJob?.sql).toContain("'embed_chunk',$2,'embedding',100,$3");
     expect(embedJob?.sql).toContain("'publish_item',$4,'publish',0,$5");
+  });
+
+  it('preserves compatible vectors when a patch changes only metadata', async () => {
+    const client = new KnowledgeWriteClient(existingWorkItem({}));
+    const execute = client.query.bind(client);
+    client.query = async <Row extends Record<string, unknown>>(
+      sql: string,
+      values?: unknown[],
+    ): Promise<PgQueryResult<Row>> => {
+      const result = await execute<Row>(sql, values);
+      if (sql.includes('SELECT c.embedding,c.embedding_model_id')) {
+        expect(values?.slice(2)).toEqual([
+          embeddingHash('Claimable work\n\nCoordinate this work.'),
+          'model-v1',
+          'r1',
+          3,
+        ]);
+        return {
+          rows: [
+            { embedding: '[1,0,0]', embedding_model_id: 'model-1' },
+          ] as unknown as Row[],
+        };
+      }
+      return result;
+    };
+    const store = new PgKnowledgeStore(
+      {
+        connect: async () => client,
+        query: (sql, values) => client.query(sql, values),
+      },
+      {
+        embeddingCacheModel: {
+          name: 'model-v1',
+          revision: 'r1',
+          dimensions: 3,
+        },
+      },
+    );
+    const result = await store.writeProjectKnowledge({
+      projectKey: 'MC-Platform',
+      actor: 'codex',
+      changes: [
+        {
+          operation: 'patch',
+          item: { id: 'item-1', deliveryStatus: 'blocked' },
+        },
+      ],
+    });
+    expect(result.changes[0]?.embeddingState).toBe('unchanged');
+    expect(result.changes[0]?.version).toBe(2);
+    expect(
+      client.queries.some(({ sql }) => sql.includes("VALUES($1,'embed_chunk'")),
+    ).toBe(false);
+    expect(
+      client.queries.some(({ sql }) => sql.includes("'publish_item'")),
+    ).toBe(true);
+    const inserted = client.queries.find(({ sql }) =>
+      sql.includes('INSERT INTO project_knowledge.search_chunks'),
+    );
+    expect(inserted?.values?.slice(12)).toEqual(['[1,0,0]', 'model-1']);
   });
 
   it('persists a normalized kind when patching an existing item', async () => {
@@ -752,6 +817,9 @@ describe('PostgreSQL knowledge store', () => {
     expect(exactSql).toContain('c.worktree_id=$5');
     expect(exactSql).toContain('c.kind=ANY($6)');
     expect(exactSql).toContain('c.domain=ANY($7)');
+    expect(exactSql).toContain(
+      "($2::uuid IS NOT NULL OR c.snapshot_id IS NULL OR s.state='active')",
+    );
     expect(result.results.map((hit) => hit.title)).toEqual([
       'Architecture',
       'Architecture decision',
@@ -823,6 +891,43 @@ describe('PostgreSQL knowledge store', () => {
       "($2::uuid IS NOT NULL OR c.snapshot_id IS NULL OR s.state='active')",
     );
   });
+
+  it.each([true, false])(
+    'scopes documentation freshness to the requested worktree (semantic=%s)',
+    async (semantic) => {
+      let searchSql = '';
+      let searchValues: unknown[] | undefined;
+      const base = searchPool(1);
+      const pool: PgPoolLike = {
+        connect: base.connect,
+        query: async <Row extends Record<string, unknown>>(
+          sql: string,
+          values?: unknown[],
+        ): Promise<PgQueryResult<Row>> => {
+          if (!sql.includes('FROM project_knowledge.projects')) {
+            searchSql = sql;
+            searchValues = values;
+          }
+          return base.query<Row>(sql, values);
+        },
+      };
+      await new PgKnowledgeStore(
+        pool,
+        semantic ? { embedder: { embed: async () => [0.1, 0.2] } } : {},
+      ).searchProjectContext({
+        projectKey: 'MC-Platform',
+        query: 'architecture',
+        mode: 'hybrid',
+        worktreeId: 'worktree-a',
+        limit: 6,
+        maxTokens: 2000,
+      });
+      expect(searchValues?.[9]).toBe('worktree-a');
+      expect(searchSql).toMatch(
+        /WHERE item_id=c.item_id AND \(\$2::uuid IS NULL OR snapshot_id=\$2\)\s+AND \(\$10::uuid IS NULL OR worktree_id=\$10\)/u,
+      );
+    },
+  );
 
   it('reports stale source freshness when an indexed worktree no longer matches its active snapshot', async () => {
     const pool: PgPoolLike = {
@@ -1078,6 +1183,297 @@ describe('PostgreSQL knowledge store', () => {
       stateHash: first.stateHash,
       results: [],
     });
+  });
+
+  it.each(['head', 'dirty'])(
+    'invalidates bound recall freshness when the worktree %s changes',
+    async (changed) => {
+      let head = 'indexed-head';
+      let dirty = 'indexed-dirty';
+      const base = searchPool(1);
+      const pool: PgPoolLike = {
+        connect: base.connect,
+        query: async <Row extends Record<string, unknown>>(
+          sql: string,
+          values?: unknown[],
+        ): Promise<PgQueryResult<Row>> => {
+          if (sql.includes('project_knowledge.retrieval_epochs'))
+            return {
+              rows: [
+                { db_revision: 4, retrieval_epoch: '1' },
+              ] as unknown as Row[],
+            };
+          if (sql.includes('JOIN project_knowledge.repositories'))
+            return {
+              rows: [
+                {
+                  project_id: 'project-1',
+                  db_revision: 4,
+                  worktree_id: 'worktree-1',
+                  snapshot_id: 'snapshot-1',
+                  head_commit: head,
+                  snapshot_head: 'indexed-head',
+                  dirty_hash: dirty,
+                  snapshot_dirty_hash: 'indexed-dirty',
+                  state: 'active',
+                },
+              ] as unknown as Row[],
+            };
+          return base.query<Row>(sql, values);
+        },
+      };
+      const store = new PgKnowledgeStore(pool);
+      const input = {
+        projectKey: 'MC-Platform',
+        intent: 'find' as const,
+        query: 'architecture',
+        worktreePath: 'C:/repo',
+        maxTokens: 600,
+      };
+      const first = await store.recallProjectKnowledge(input);
+      expect(first.freshness).toBe('current');
+      if (changed === 'head') head = 'next-head';
+      else dirty = 'changed-dirty';
+      const second = await store.recallProjectKnowledge({
+        ...input,
+        knownStateHash: first.stateHash,
+      });
+      expect(second.freshness).toBe('stale');
+      expect(second.status).toBe('modified');
+      expect(second.stateHash).not.toBe(first.stateHash);
+    },
+  );
+
+  it('reuses unchanged recall retrieval but invalidates on epochs, scope, budget and claim expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-31T00:00:00Z'));
+      let epoch = '1';
+      let retrievals = 0;
+      const base = searchPool(1);
+      const pool: PgPoolLike = {
+        connect: base.connect,
+        query: async <Row extends Record<string, unknown>>(
+          sql: string,
+          values?: unknown[],
+        ): Promise<PgQueryResult<Row>> => {
+          if (sql.includes('project_knowledge.retrieval_epochs'))
+            return {
+              rows: [
+                { db_revision: 4, retrieval_epoch: epoch },
+              ] as unknown as Row[],
+            };
+          const result = await base.query<Row>(sql, values);
+          if (!sql.includes('FROM project_knowledge.projects')) {
+            retrievals++;
+            result.rows = result.rows.map((row) => ({
+              ...row,
+              metadata: {
+                claimedBy: 'codex',
+                claimExpiresAt: '2026-10-31T00:00:05Z',
+              },
+            }));
+          }
+          return result;
+        },
+      };
+      const store = new PgKnowledgeStore(pool);
+      const input = {
+        projectKey: 'MC-Platform',
+        intent: 'find' as const,
+        query: 'architecture',
+        maxTokens: 600,
+      };
+      const first = await store.recallProjectKnowledge(input);
+      const repeated = await store.recallProjectKnowledge({
+        ...input,
+        knownStateHash: first.stateHash,
+      });
+      expect(repeated.status).toBe('not_modified');
+      expect(retrievals).toBe(1);
+      epoch = '2';
+      await store.recallProjectKnowledge(input);
+      expect(retrievals).toBe(2);
+      await store.recallProjectKnowledge({
+        ...input,
+        worktreeId: 'worktree-b',
+      });
+      await store.recallProjectKnowledge({ ...input, maxTokens: 700 });
+      expect(retrievals).toBe(4);
+      vi.advanceTimersByTime(5001);
+      const expired = await store.recallProjectKnowledge(input);
+      expect(expired.results[0]?.claimedBy).toBeUndefined();
+      expect(retrievals).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not cache recall when a mutation commits during retrieval', async () => {
+    let epoch = 0;
+    let retrievals = 0;
+    const base = searchPool(1);
+    const pool: PgPoolLike = {
+      connect: base.connect,
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        values?: unknown[],
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('project_knowledge.retrieval_epochs'))
+          return {
+            rows: [
+              { db_revision: 4, retrieval_epoch: String(epoch) },
+            ] as unknown as Row[],
+          };
+        if (!sql.includes('FROM project_knowledge.projects')) {
+          epoch++;
+          retrievals++;
+        }
+        return base.query<Row>(sql, values);
+      },
+    };
+    const store = new PgKnowledgeStore(pool);
+    const input = {
+      projectKey: 'MC-Platform',
+      intent: 'find' as const,
+      query: 'architecture',
+      maxTokens: 600,
+    };
+    await store.recallProjectKnowledge(input);
+    await store.recallProjectKnowledge(input);
+    expect(retrievals).toBe(2);
+  });
+
+  it('bounds recall cache entries and expires old results', async () => {
+    vi.useFakeTimers();
+    try {
+      let retrievals = 0;
+      const base = searchPool(1);
+      const pool: PgPoolLike = {
+        connect: base.connect,
+        query: async <Row extends Record<string, unknown>>(
+          sql: string,
+          values?: unknown[],
+        ): Promise<PgQueryResult<Row>> => {
+          if (sql.includes('project_knowledge.retrieval_epochs'))
+            return {
+              rows: [
+                { db_revision: 4, retrieval_epoch: '1' },
+              ] as unknown as Row[],
+            };
+          if (!sql.includes('FROM project_knowledge.projects')) retrievals++;
+          return base.query<Row>(sql, values);
+        },
+      };
+      const store = new PgKnowledgeStore(pool);
+      const input = {
+        projectKey: 'MC-Platform',
+        intent: 'find' as const,
+        maxTokens: 600,
+      };
+      for (let index = 0; index < 65; index++)
+        await store.recallProjectKnowledge({
+          ...input,
+          query: `query ${index}`,
+        });
+      await store.recallProjectKnowledge({ ...input, query: 'query 64' });
+      expect(retrievals).toBe(65);
+      await store.recallProjectKnowledge({ ...input, query: 'query 0' });
+      expect(retrievals).toBe(66);
+      vi.advanceTimersByTime(30_001);
+      await store.recallProjectKnowledge({ ...input, query: 'query 64' });
+      expect(retrievals).toBe(67);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries degraded semantic recall and separates filter scopes', async () => {
+    let available = false;
+    let computations = 0;
+    const base = searchPool(1);
+    const pool: PgPoolLike = {
+      connect: base.connect,
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        values?: unknown[],
+      ): Promise<PgQueryResult<Row>> => {
+        if (sql.includes('project_knowledge.retrieval_epochs'))
+          return {
+            rows: [
+              { db_revision: 4, retrieval_epoch: '1' },
+            ] as unknown as Row[],
+          };
+        return base.query<Row>(sql, values);
+      },
+    };
+    const store = new PgKnowledgeStore(pool, {
+      embedder: {
+        embed: async () => {
+          computations++;
+          if (!available) throw new Error('model unavailable');
+          return [0.1, 0.2];
+        },
+      },
+    });
+    const input = {
+      projectKey: 'MC-Platform',
+      intent: 'find' as const,
+      query: 'architecture',
+      maxTokens: 600,
+    };
+    expect((await store.recallProjectKnowledge(input)).warnings).toHaveLength(
+      1,
+    );
+    available = true;
+    expect(
+      (await store.recallProjectKnowledge(input)).warnings ?? [],
+    ).toHaveLength(0);
+    await store.recallProjectKnowledge(input);
+    expect(computations).toBe(2);
+    await store.recallProjectKnowledge({
+      ...input,
+      filters: { kinds: ['decision'] },
+    });
+    expect(computations).toBe(3);
+  });
+
+  it('returns changed freshness even when content and database revision are unchanged', async () => {
+    let freshness = 'current';
+    const base = searchPool(1);
+    const pool: PgPoolLike = {
+      connect: base.connect,
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        values?: unknown[],
+      ): Promise<PgQueryResult<Row>> => {
+        const result = await base.query<Row>(sql, values);
+        if (!sql.includes('FROM project_knowledge.projects')) {
+          result.rows = result.rows.map((row) => ({
+            ...row,
+            documentation_freshness: freshness,
+          }));
+        }
+        return result;
+      },
+    };
+    const store = new PgKnowledgeStore(pool);
+    const input = {
+      projectKey: 'MC-Platform',
+      intent: 'find' as const,
+      query: 'architecture',
+      maxTokens: 600,
+    };
+    const first = await store.recallProjectKnowledge(input);
+    expect(first.results[0]?.documentationFreshness).toBe('current');
+    freshness = 'stale';
+    const second = await store.recallProjectKnowledge({
+      ...input,
+      knownStateHash: first.stateHash,
+    });
+    expect(second.status).toBe('modified');
+    expect(second.results[0]?.documentationFreshness).toBe('stale');
+    expect(second.stateHash).not.toBe(first.stateHash);
   });
 
   it('omits records whose item hash is already known by the caller', async () => {
@@ -1884,7 +2280,7 @@ describe('PostgreSQL knowledge store', () => {
         this.statements.push(sql);
         if (
           sql.includes('FROM project_knowledge.projects') &&
-          sql.includes('FOR UPDATE')
+          sql.includes('FOR NO KEY UPDATE')
         )
           return {
             rows: [
@@ -1937,7 +2333,7 @@ describe('PostgreSQL knowledge store', () => {
         this.statements.push(sql);
         if (
           sql.includes('FROM project_knowledge.projects') &&
-          sql.includes('FOR UPDATE')
+          sql.includes('FOR NO KEY UPDATE')
         )
           return {
             rows: [

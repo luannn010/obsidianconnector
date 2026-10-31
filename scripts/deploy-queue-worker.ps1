@@ -15,6 +15,10 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
 $scp = (Get-Command scp.exe -ErrorAction Stop).Source
 $composeSource = Join-Path $repoRoot 'services\queue-worker\compose.yaml'
+if (-not $PSCmdlet.ShouldProcess($Server, "Deploy shared worker $Image")) {
+  [ordered]@{ server = $Server; release = $Release; image = $Image; action = 'what-if' } | ConvertTo-Json -Compress
+  return
+}
 $temporary = Join-Path ([IO.Path]::GetTempPath()) "project-knowledge-debian-$Release"
 [void][IO.Directory]::CreateDirectory($temporary)
 $runtimeFile = Join-Path $temporary 'runtime.env'
@@ -41,10 +45,6 @@ Set-Content -LiteralPath $runtimeFile -Encoding utf8NoBOM -Value @(
   'PROJECT_KNOWLEDGE_SNAPSHOT_RETENTION_DAYS=7'
 )
 $remoteRelease = "$RemoteRoot/releases/$Release"
-if (-not $PSCmdlet.ShouldProcess($Server, "Deploy shared worker $Image")) {
-  [ordered]@{ server = $Server; release = $Release; image = $Image; action = 'what-if' } | ConvertTo-Json -Compress
-  return
-}
 try {
   $previousImage = (& $ssh $Server "docker inspect project-knowledge-queue-queue-worker-1 --format '{{.Config.Image}}' 2>/dev/null || true").Trim()
   & $ssh $Server "set -eu; mkdir -p '$remoteRelease' '$RemoteRoot/releases'"

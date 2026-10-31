@@ -1,6 +1,9 @@
 import os
 import secrets
-from threading import BoundedSemaphore
+from threading import Condition
+from contextlib import contextmanager
+from time import monotonic
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -24,16 +27,64 @@ RERANK_MODEL = os.getenv(
 ).strip()
 BEARER_TOKEN = os.getenv("RETRIEVAL_MODEL_BEARER_TOKEN", "").strip()
 MAX_CONCURRENCY = bounded_integer("RETRIEVAL_MODEL_MAX_CONCURRENCY", 2, 1, 8)
+MAX_BACKGROUND = min(
+    max(1, MAX_CONCURRENCY - 1),
+    bounded_integer("RETRIEVAL_MODEL_MAX_BACKGROUND", 1, 1, 8),
+)
+
+
+class ModelCapacity:
+    def __init__(self, total: int, background: int):
+        self.total = total
+        self.background = min(max(1, total - 1), background)
+        self.active = 0
+        self.active_background = 0
+        self.waiting_interactive = 0
+        self.condition = Condition()
+
+    @contextmanager
+    def slot(self, priority: str):
+        interactive = priority == "interactive"
+        deadline = monotonic() + 25
+        with self.condition:
+            if interactive:
+                self.waiting_interactive += 1
+            try:
+                while self.active >= self.total or (
+                    not interactive and (
+                        self.active_background >= self.background or self.waiting_interactive > 0
+                    )
+                ):
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise HTTPException(status_code=503, detail="Model capacity is busy")
+                    self.condition.wait(remaining)
+                self.active += 1
+                if not interactive:
+                    self.active_background += 1
+            finally:
+                if interactive:
+                    self.waiting_interactive -= 1
+                    self.condition.notify_all()
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.active -= 1
+                if not interactive:
+                    self.active_background -= 1
+                self.condition.notify_all()
 
 app = FastAPI()
 embedder = SentenceTransformer(EMBED_MODEL)
 reranker = None
-model_slots = BoundedSemaphore(MAX_CONCURRENCY)
+model_slots = ModelCapacity(MAX_CONCURRENCY, MAX_BACKGROUND)
 
 
 class EmbeddingRequest(BaseModel):
     input: str | list[str]
     model: str = EMBED_MODEL
+    priority: Literal["interactive", "background"] = "background"
 
 
 class RerankDocument(BaseModel):
@@ -66,6 +117,7 @@ def health():
         "dimensions": EMBED_DIMENSIONS,
         "reranker_model": RERANK_MODEL,
         "max_concurrency": MAX_CONCURRENCY,
+        "max_background": MAX_BACKGROUND,
         "authentication": "bearer",
     }
 
@@ -73,7 +125,7 @@ def health():
 @app.post("/v1/embeddings", dependencies=[Depends(require_bearer)])
 def embeddings(request: EmbeddingRequest):
     texts = [request.input] if isinstance(request.input, str) else request.input
-    with model_slots:
+    with model_slots.slot(request.priority):
         vectors = embedder.encode(texts, normalize_embeddings=True).tolist()
     return {
         "model": EMBED_MODEL,
@@ -87,7 +139,7 @@ def embeddings(request: EmbeddingRequest):
 @app.post("/v1/rerank", dependencies=[Depends(require_bearer)])
 def rerank(request: RerankRequest):
     global reranker
-    with model_slots:
+    with model_slots.slot("interactive"):
         if reranker is None:
             reranker = CrossEncoder(RERANK_MODEL)
         scores = reranker.predict(

@@ -12,6 +12,24 @@ afterEach(() => {
 });
 
 describe('retrieval model HTTP clients', () => {
+  it('reserves interactive priority for single queries and background for batches', async () => {
+    const priorities: string[] = [];
+    globalThis.fetch = async (_input, init) => {
+      const request = JSON.parse(String(init?.body));
+      priorities.push(request.priority);
+      return Response.json({
+        data: request.input.map(() => ({ embedding: [1, 2] })),
+      });
+    };
+    const client = new OpenAiCompatibleEmbeddingClient(
+      'http://retrieval.local',
+      'model',
+      2,
+    );
+    await client.embed('query');
+    await client.embedMany(['document']);
+    expect(priorities).toEqual(['interactive', 'background']);
+  });
   it('authenticates an embedding request with the configured bearer token', async () => {
     globalThis.fetch = async (_input, init) => {
       const headers = new Headers(init?.headers);

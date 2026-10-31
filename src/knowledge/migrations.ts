@@ -1,3 +1,6 @@
+import { retrievalEpochMigration } from './retrieval-epoch-migration.js';
+import { workerMaintenanceMigration } from './worker-maintenance-migration.js';
+
 export interface KnowledgeMigration {
   id: string;
   sql: string;
@@ -739,4 +742,25 @@ CREATE INDEX IF NOT EXISTS worker_instances_current_job
   ON project_knowledge.worker_instances(current_job_id) WHERE current_job_id IS NOT NULL;
 `,
   },
+  {
+    id: '0014_embedding_compute_leases',
+    sql: String.raw`
+CREATE TABLE IF NOT EXISTS project_knowledge.embedding_compute_leases (
+  model_key text NOT NULL,
+  text_hash char(64) NOT NULL,
+  lease_owner uuid NOT NULL,
+  lease_expires_at timestamptz NOT NULL,
+  PRIMARY KEY(model_key,text_hash)
+);
+DO $grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='knowledge_connector') THEN
+    GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE project_knowledge.embedding_compute_leases TO knowledge_connector;
+  END IF;
+END
+$grant$;
+`,
+  },
+  retrievalEpochMigration,
+  workerMaintenanceMigration,
 ];
