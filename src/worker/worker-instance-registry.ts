@@ -1,5 +1,16 @@
+import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import type { WorkerCapability } from './shared-job-queue.js';
+
+export function createWorkerInstanceId(
+  hostKind: 'windows' | 'debian',
+  hostname: string,
+  pid: number,
+): string {
+  // Host-network containers can share both the hostname and PID 1.
+  // A process nonce also prevents a restarted worker inheriting old leases.
+  return `${hostKind}-${hostname}-${pid}-${randomUUID()}`;
+}
 
 export class WorkerInstanceRegistry {
   constructor(

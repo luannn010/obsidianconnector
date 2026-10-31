@@ -14,7 +14,10 @@ import {
 } from './worker/shared-job-queue.js';
 import { SourceSyncJobHandler } from './worker/source-sync-job-handler.js';
 import { acquireSingletonLock } from './worker/singleton-lock.js';
-import { WorkerInstanceRegistry } from './worker/worker-instance-registry.js';
+import {
+  createWorkerInstanceId,
+  WorkerInstanceRegistry,
+} from './worker/worker-instance-registry.js';
 import { runMaintenanceCycle } from './worker/maintenance-cycle.js';
 import { runMaintenanceWithLease } from './worker/maintenance-window.js';
 
@@ -52,7 +55,7 @@ const hostKind =
   process.env.PROJECT_KNOWLEDGE_HOST_KIND === 'windows' ? 'windows' : 'debian';
 const workerId =
   process.env.PROJECT_KNOWLEDGE_WORKER_ID?.trim() ||
-  `${hostKind}-${os.hostname()}-${process.pid}`;
+  createWorkerInstanceId(hostKind, os.hostname(), process.pid);
 const releaseId = process.env.PROJECT_KNOWLEDGE_WORKER_RELEASE?.trim();
 const batchSize = Math.min(
   64,

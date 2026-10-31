@@ -3,11 +3,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { ToolCallRecord } from '@mcp-dashboard/metrics';
 import { afterEach, describe, expect, it } from 'vitest';
 import { VaultRegistry } from '../../src/config/registry.js';
 import type { KnowledgeStore } from '../../src/knowledge/types.js';
 import { createServer, type ServerOptions } from '../../src/server.js';
+import { loadMetricsModule } from '../../src/metrics-loader.js';
+
+type ToolCallRecord = Record<string, unknown>;
+const metricsModule = loadMetricsModule();
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -30,9 +33,12 @@ async function connect(options: ServerOptions) {
 }
 
 describe('obsidian-local tool-call metrics', () => {
-  it('records admin-profile tool calls', async () => {
+  it.skipIf(!metricsModule)('records admin-profile tool calls', async () => {
     const rows: ToolCallRecord[] = [];
-    const client = await connect({ metrics: { record: (r) => rows.push(r) } });
+    const client = await connect({
+      metrics: { record: (r: ToolCallRecord) => rows.push(r) },
+      metricsModule,
+    });
     await client.callTool({ name: 'list_vaults', arguments: {} });
     expect(rows).toEqual([
       expect.objectContaining({
@@ -44,29 +50,33 @@ describe('obsidian-local tool-call metrics', () => {
     ]);
   });
 
-  it('records projectKey for standard-profile knowledge tools', async () => {
-    const rows: ToolCallRecord[] = [];
-    const knowledge = {
-      getProjectSnapshot: async () => ({
-        snapshotId: 's1',
-        gitRevision: 'abc',
-      }),
-    } as unknown as KnowledgeStore;
-    const client = await connect({
-      profile: 'standard',
-      knowledge,
-      metrics: { record: (r) => rows.push(r) },
-    });
-    await client.callTool({
-      name: 'get_project_snapshot',
-      arguments: { projectKey: 'MC-Platform', worktreePath: 'C:/x' },
-    });
-    expect(rows[0]).toMatchObject({
-      tool: 'get_project_snapshot',
-      projectKey: 'MC-Platform',
-      ok: true,
-    });
-  });
+  it.skipIf(!metricsModule)(
+    'records projectKey for standard-profile knowledge tools',
+    async () => {
+      const rows: ToolCallRecord[] = [];
+      const knowledge = {
+        getProjectSnapshot: async () => ({
+          snapshotId: 's1',
+          gitRevision: 'abc',
+        }),
+      } as unknown as KnowledgeStore;
+      const client = await connect({
+        profile: 'standard',
+        knowledge,
+        metrics: { record: (r: ToolCallRecord) => rows.push(r) },
+        metricsModule,
+      });
+      await client.callTool({
+        name: 'get_project_snapshot',
+        arguments: { projectKey: 'MC-Platform', worktreePath: 'C:/x' },
+      });
+      expect(rows[0]).toMatchObject({
+        tool: 'get_project_snapshot',
+        projectKey: 'MC-Platform',
+        ok: true,
+      });
+    },
+  );
 
   it('records nothing and still works when metrics are not configured', async () => {
     const client = await connect({});
@@ -80,7 +90,7 @@ describe('obsidian-local tool-call metrics', () => {
   it('starts and serves tools when the metrics package cannot be loaded', async () => {
     const rows: ToolCallRecord[] = [];
     const client = await connect({
-      metrics: { record: (record) => rows.push(record) },
+      metrics: { record: (record: ToolCallRecord) => rows.push(record) },
       metricsModule: null,
     });
     const result = await client.callTool({
