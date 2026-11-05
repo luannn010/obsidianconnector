@@ -92,7 +92,7 @@ export class SharedJobQueue {
             limit,
             workerId,
             leaseSeconds,
-            options.sourceWorktreeId ?? null,
+            options.sourceWorktreeId?.trim() || null,
           ],
         )
       ).rows;
@@ -168,9 +168,7 @@ export class SharedJobQueue {
     return recovered.rowCount ?? 0;
   }
 
-  async find(
-    jobId: string,
-  ): Promise<
+  async find(jobId: string): Promise<
     | (SharedJob & {
         state: string;
         resolution: Record<string, unknown>;

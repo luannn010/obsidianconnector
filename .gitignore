@@ -6,3 +6,5 @@ config/vaults.json
 *.log
 .mcp.json
 .codex/hooks.json
+.claude/settings.local.json
+.collab/tasks/

@@ -83,4 +83,27 @@ describe('SharedJobQueue', () => {
     expect(sql).toContain("state='pending'");
     expect(sql).not.toContain('required_capability=');
   });
+
+  it.each(['', '   '])(
+    'treats an empty Compose worktree filter as unset (%j)',
+    async (sourceWorktreeId) => {
+      const client = {
+        query: vi.fn(async (...args: [string, unknown[]?]) => {
+          void args;
+          return { rows: [] };
+        }),
+        release: vi.fn(),
+      };
+      const queue = new SharedJobQueue({
+        connect: async () => client,
+      } as unknown as Pool);
+      await queue.claim(['source-sync'], 'worker-1', 1, 120, {
+        sourceWorktreeId,
+      });
+      const claim = client.query.mock.calls.find(([sql]) =>
+        sql.includes('row_number() OVER'),
+      );
+      expect(claim?.[1]?.[4]).toBeNull();
+    },
+  );
 });

@@ -126,6 +126,41 @@ class RetrievalModelServerTest(unittest.TestCase):
         self.assertTrue(all(response.status_code == 200 for response in responses))
         self.assertEqual(FakeSentenceTransformer.max_active, 1)
 
+    def test_background_cannot_consume_interactive_reservation(self):
+        capacity = server.ModelCapacity(2, 1)
+        background_started = threading.Event()
+        interactive_started = threading.Event()
+        release = threading.Event()
+
+        def background():
+            with capacity.slot("background"):
+                background_started.set()
+                release.wait(2)
+
+        def interactive():
+            with capacity.slot("interactive"):
+                interactive_started.set()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with capacity.slot("background"):
+                bg = executor.submit(background)
+                query = executor.submit(interactive)
+                try:
+                    self.assertTrue(interactive_started.wait(1))
+                    self.assertFalse(background_started.is_set())
+                finally:
+                    release.set()
+            query.result()
+            bg.result()
+
+    def test_one_slot_background_and_exception_release_remain_functional(self):
+        capacity = server.ModelCapacity(1, 1)
+        with self.assertRaises(ValueError):
+            with capacity.slot("background"):
+                raise ValueError("model failed")
+        with capacity.slot("interactive"):
+            pass
+
 
 if __name__ == "__main__":
     unittest.main()

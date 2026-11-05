@@ -14,8 +14,12 @@ import {
 } from './worker/shared-job-queue.js';
 import { SourceSyncJobHandler } from './worker/source-sync-job-handler.js';
 import { acquireSingletonLock } from './worker/singleton-lock.js';
-import { WorkerInstanceRegistry } from './worker/worker-instance-registry.js';
+import {
+  createWorkerInstanceId,
+  WorkerInstanceRegistry,
+} from './worker/worker-instance-registry.js';
 import { runMaintenanceCycle } from './worker/maintenance-cycle.js';
+import { runMaintenanceWithLease } from './worker/maintenance-window.js';
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -51,7 +55,7 @@ const hostKind =
   process.env.PROJECT_KNOWLEDGE_HOST_KIND === 'windows' ? 'windows' : 'debian';
 const workerId =
   process.env.PROJECT_KNOWLEDGE_WORKER_ID?.trim() ||
-  `${hostKind}-${os.hostname()}-${process.pid}`;
+  createWorkerInstanceId(hostKind, os.hostname(), process.pid);
 const releaseId = process.env.PROJECT_KNOWLEDGE_WORKER_RELEASE?.trim();
 const batchSize = Math.min(
   64,
@@ -105,6 +109,11 @@ const sourceHandler = capabilities.includes('source-sync')
         'C:\\Users\\luann\\Documents',
       process.env.PROJECT_KNOWLEDGE_PROJECTS_CONTAINER_ROOT ?? '/projects',
       process.env.PROJECT_KNOWLEDGE_VAULTS_CONTAINER_ROOT ?? '/vaults',
+      {
+        name: runtime.embeddingModel,
+        revision: runtime.embeddingRevision,
+        dimensions: runtime.embeddingDimensions,
+      },
     )
   : undefined;
 let embedder: EmbeddingQueueProcessor | undefined;
@@ -163,22 +172,35 @@ try {
         capabilities.includes('maintenance') &&
         Date.now() >= nextMaintenance
       ) {
-        nextMaintenance = Date.now() + 24 * 60 * 60 * 1000;
-        work += await runMaintenanceCycle(
-          pool,
-          queue,
-          retentionDays,
-          (error) => {
-            console.error(
-              JSON.stringify({
-                event: 'maintenance_error',
-                workerId,
-                message: error instanceof Error ? error.message : String(error),
-              }),
-            );
-          },
-          payloadRetentionDays,
-        );
+        nextMaintenance = Date.now() + 60_000;
+        work +=
+          (await runMaintenanceWithLease(
+            pool,
+            'daily-maintenance',
+            24 * 60 * 60 * 1000,
+            async () => {
+              let failure: unknown;
+              const completed = await runMaintenanceCycle(
+                pool,
+                queue,
+                retentionDays,
+                (error) => {
+                  failure = error;
+                  console.error(
+                    JSON.stringify({
+                      event: 'maintenance_error',
+                      workerId,
+                      message:
+                        error instanceof Error ? error.message : String(error),
+                    }),
+                  );
+                },
+                payloadRetentionDays,
+              );
+              if (failure) throw failure;
+              return completed;
+            },
+          )) ?? 0;
       }
       if (sourceHandler) {
         const [job] = await queue.claim(['source-sync'], workerId, 1, 120, {

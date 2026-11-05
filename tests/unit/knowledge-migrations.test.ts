@@ -112,9 +112,12 @@ describe('project knowledge migrations', () => {
     );
     expect(migration!.sql).toContain("date_trunc('hour', started_at, 'UTC')");
     expect(migration!.sql).toContain('tool_calls_started');
-    expect(knowledgeMigrations.at(-1)?.id).toBe('0013_foreign_key_indexes');
     const indexSql = knowledgeMigrations
-      .slice(-2)
+      .filter(({ id }) =>
+        ['0012_outbox_parent_job_index', '0013_foreign_key_indexes'].includes(
+          id,
+        ),
+      )
       .map(({ sql }) => sql)
       .join('\n');
     expect(indexSql).toContain('outbox_jobs(parent_job_id)');

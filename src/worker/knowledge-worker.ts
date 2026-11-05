@@ -1,4 +1,5 @@
 import { readFile, readdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
   isLazyProjectionMode,
@@ -45,6 +46,7 @@ import { EmbeddingQueueProcessor } from './embedding-queue-processor.js';
 import {
   EMBEDDABLE_CHUNK_KINDS,
   embeddingHash,
+  embeddingModelKey,
 } from '../knowledge/embed-text.js';
 
 export interface WorkerProject {
@@ -148,9 +150,9 @@ export class KnowledgeWorker {
     private readonly pool: Pool,
     private readonly embedder?: EmbeddingProvider,
     private readonly embeddingModel = {
-      name: 'BAAI/bge-large-en-v1.5',
+      name: 'BAAI/bge-small-en-v1.5',
       revision: 'local',
-      dimensions: 1024,
+      dimensions: 384,
     },
   ) {
     if (embedder)
@@ -171,32 +173,219 @@ export class KnowledgeWorker {
       project.logicalRepositoryPath ?? fingerprint.root;
     const primaryRepositoryPath =
       options.primaryRepositoryPath ?? logicalRepositoryPath;
+    type SnapshotRow = {
+      id: string;
+      head_commit: string;
+      dirty_hash: string | null;
+      dirty_paths: string[];
+      parser_revision: string;
+    };
+    const stagedPrevious = (
+      await this.pool.query<SnapshotRow>(
+        `SELECT s.id,s.head_commit,s.dirty_hash,s.dirty_paths,s.parser_revision
+         FROM project_knowledge.source_snapshots s
+         JOIN project_knowledge.worktrees w ON w.id=s.worktree_id
+         JOIN project_knowledge.projects p ON p.project_id=s.project_id
+         WHERE p.project_key=$1 AND w.path=$2 AND s.state='active'`,
+        [project.projectKey, logicalRepositoryPath],
+      )
+    ).rows[0];
+    const sameParser =
+      stagedPrevious?.parser_revision === SOURCE_PARSER_REVISION;
+    const unchangedSnapshot =
+      stagedPrevious?.head_commit === fingerprint.head &&
+      stagedPrevious.dirty_hash === fingerprint.dirtyHash &&
+      sameParser;
+    const changes = unchangedSnapshot
+      ? []
+      : stagedPrevious && sameParser
+        ? await changedIndexableFiles(
+            fingerprint.root,
+            stagedPrevious.head_commit,
+            fingerprint.head,
+            fingerprint.status,
+          )
+        : (await listIndexableFiles(fingerprint.root)).map((file) => ({
+            status: 'A',
+            path: file,
+            previousPath: undefined as string | undefined,
+          }));
+    if (!unchangedSnapshot && stagedPrevious)
+      appendIndexablePreviousDirtyPaths(
+        changes,
+        stagedPrevious.dirty_paths ?? [],
+      );
+    const priorFiles =
+      stagedPrevious && !unchangedSnapshot
+        ? (
+            await this.pool.query<{
+              repo_relative_path: string;
+              source_hash: string;
+            }>(
+              `SELECT repo_relative_path,source_hash FROM project_knowledge.code_files WHERE snapshot_id=$1
+               AND ($2::text[] IS NULL OR repo_relative_path=ANY($2))`,
+              [
+                stagedPrevious.id,
+                sameParser
+                  ? changes.flatMap((change) => [
+                      change.path.replace(/\\/gu, '/'),
+                      ...(change.previousPath
+                        ? [change.previousPath.replace(/\\/gu, '/')]
+                        : []),
+                    ])
+                  : null,
+              ],
+            )
+          ).rows
+        : [];
+    const priorHashes = new Map(
+      priorFiles.map((file) => [file.repo_relative_path, file.source_hash]),
+    );
+    const changedPathSet = new Set<string>(
+      sameParser ? [] : priorHashes.keys(),
+    );
+    const stagedFiles: Array<{
+      id: string;
+      path: string;
+      language: string;
+      hash: string;
+      units: SourceUnit[];
+    }> = [];
+    for (const change of changes) {
+      const relative = change.path.replace(/\\/gu, '/');
+      const absolute = path.resolve(fingerprint.root, change.path);
+      if (!absolute.startsWith(`${fingerprint.root}${path.sep}`)) continue;
+      if (change.previousPath)
+        changedPathSet.add(change.previousPath.replace(/\\/gu, '/'));
+      const content =
+        change.status === 'D'
+          ? undefined
+          : await readFile(absolute, 'utf8').catch((error: unknown) => {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+                return undefined;
+              throw error;
+            });
+      const hash = content === undefined ? undefined : sourceHash(content);
+      if (
+        sameParser &&
+        hash !== undefined &&
+        priorHashes.get(relative) === hash
+      )
+        continue;
+      changedPathSet.add(relative);
+      if (content === undefined || content.includes('\u0000')) continue;
+      const units = parseSourceUnits(relative, content);
+      stagedFiles.push({
+        id: randomUUID(),
+        path: relative,
+        language: languageFor(relative),
+        hash: hash!,
+        units: units.length
+          ? units
+          : splitDocumentationUnit({
+              title: relative,
+              headingLine: relative,
+              content,
+              startLine: 1,
+              endLine: content.split('\n').length,
+            }),
+      });
+    }
+    const changedPaths = [...changedPathSet];
+    const isPrimaryWorktree =
+      logicalRepositoryPath.toLowerCase() ===
+      primaryRepositoryPath.toLowerCase();
+    const chunks = stagedFiles.flatMap((file) =>
+      file.units.map((unit) => ({
+        id: randomUUID(),
+        file_id: file.id,
+        kind: unit.kind,
+        title: unit.title,
+        content: unit.content,
+        content_hash: unit.contentHash,
+        token_count: countSerializedTokens(unit.content),
+        embed_hash: sourceChunkEmbeddingPolicy(
+          unit.kind,
+          unit.content,
+          isPrimaryWorktree,
+        ).embedHash,
+        metadata: {
+          path: file.path,
+          ...(unit.symbol ? { symbol: unit.symbol } : {}),
+          ...(unit.endpoint ? { endpoint: unit.endpoint } : {}),
+          ...(unit.schemaTable ? { schema_table: unit.schemaTable } : {}),
+          ...(unit.heading ? { heading: unit.heading } : {}),
+          lines: { start: unit.startLine, end: unit.endLine },
+          citation: `${file.path}:${unit.startLine}`,
+        },
+      })),
+    );
+    const symbols = stagedFiles.flatMap((file) =>
+      file.units
+        .filter((unit) => unit.kind === 'symbol' && unit.symbol)
+        .map((unit) => ({
+          file_id: file.id,
+          qualified_name: unit.symbol,
+          symbol_kind: unit.kind,
+          start_line: unit.startLine,
+          end_line: unit.endLine,
+        })),
+    );
+    const assertFingerprint = async () => {
+      const current = await fingerprintWorktree(project.repositoryPath);
+      if (
+        current.head !== fingerprint.head ||
+        current.dirtyHash !== fingerprint.dirtyHash
+      )
+        throw new Error(
+          'Source changed during synchronization; retry reconciliation',
+        );
+    };
+    await assertFingerprint();
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const projectRow = (
-        await client.query<{ project_id: string }>(
-          `
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+        [`source-sync:${project.projectKey}:${logicalRepositoryPath}`],
+      );
+      const projectRow =
+        (
+          await client.query<{ project_id: string }>(
+            'SELECT project_id FROM project_knowledge.projects WHERE project_key=$1',
+            [project.projectKey],
+          )
+        ).rows[0] ??
+        (
+          await client.query<{ project_id: string }>(
+            `
         INSERT INTO project_knowledge.projects(project_key,name) VALUES($1,$2)
         ON CONFLICT(project_key) DO UPDATE SET name=EXCLUDED.name,updated_at=now()
         RETURNING project_id`,
-          [project.projectKey, project.name],
-        )
-      ).rows[0]!;
-      const repository = (
-        await client.query<{ id: string }>(
-          `
+            [project.projectKey, project.name],
+          )
+        ).rows[0]!;
+      const repository =
+        (
+          await client.query<{ id: string }>(
+            'SELECT id FROM project_knowledge.repositories WHERE project_id=$1 AND root_path=$2',
+            [projectRow.project_id, primaryRepositoryPath],
+          )
+        ).rows[0] ??
+        (
+          await client.query<{ id: string }>(
+            `
         INSERT INTO project_knowledge.repositories(project_id,name,root_path,default_branch)
         VALUES($1,$2,$3,$4) ON CONFLICT(project_id,root_path) DO UPDATE SET name=EXCLUDED.name
         RETURNING id`,
-          [
-            projectRow.project_id,
-            project.name,
-            primaryRepositoryPath,
-            fingerprint.branch,
-          ],
-        )
-      ).rows[0]!;
+            [
+              projectRow.project_id,
+              project.name,
+              primaryRepositoryPath,
+              fingerprint.branch,
+            ],
+          )
+        ).rows[0]!;
       const worktree = (
         await client.query<{ id: string }>(
           `
@@ -236,11 +425,16 @@ export class KnowledgeWorker {
           [projectRow.project_id, worktree.id],
         )
       ).rows[0];
+      if (previous?.id !== stagedPrevious?.id)
+        throw new Error(
+          'Source snapshot changed during staging; retry reconciliation',
+        );
       if (
         previous?.head_commit === fingerprint.head &&
         previous.dirty_hash === fingerprint.dirtyHash &&
         previous.parser_revision === SOURCE_PARSER_REVISION
       ) {
+        await assertFingerprint();
         await client.query(
           `UPDATE project_knowledge.worktrees SET branch=$2,head_commit=$3,dirty_hash=$4,
              dirty_paths=$5,last_seen_at=now() WHERE id=$1`,
@@ -270,161 +464,133 @@ export class KnowledgeWorker {
           ],
         )
       ).rows[0]!;
-      let changes: Array<{
-        status: string;
-        path: string;
-        previousPath?: string;
-      }>;
-      if (previous) {
-        changes =
-          previous.parser_revision === SOURCE_PARSER_REVISION
-            ? await changedIndexableFiles(
-                fingerprint.root,
-                previous.head_commit,
-                fingerprint.head,
-                fingerprint.status,
-              )
-            : (await listIndexableFiles(fingerprint.root)).map((file) => ({
-                status: 'A',
-                path: file,
-              }));
-        appendIndexablePreviousDirtyPaths(changes, previous.dirty_paths ?? []);
+      if (previous && sameParser) {
         await client.query(
           `INSERT INTO project_knowledge.code_files(id,project_id,snapshot_id,repo_relative_path,language,source_hash,deleted)
-          SELECT gen_random_uuid(),project_id,$2,repo_relative_path,language,source_hash,deleted FROM project_knowledge.code_files WHERE snapshot_id=$1`,
-          [previous.id, snapshot.id],
+           SELECT gen_random_uuid(),project_id,$2,repo_relative_path,language,source_hash,deleted
+           FROM project_knowledge.code_files WHERE snapshot_id=$1
+             AND NOT (repo_relative_path=ANY($3::text[]))`,
+          [previous.id, snapshot.id, changedPaths],
         );
         await client.query(
           `INSERT INTO project_knowledge.code_symbols(project_id,snapshot_id,file_id,qualified_name,symbol_kind,signature,start_line,end_line)
-          SELECT s.project_id,$2,nf.id,s.qualified_name,s.symbol_kind,s.signature,s.start_line,s.end_line
-          FROM project_knowledge.code_symbols s JOIN project_knowledge.code_files of ON of.id=s.file_id
-          JOIN project_knowledge.code_files nf ON nf.snapshot_id=$2 AND nf.repo_relative_path=of.repo_relative_path
-          WHERE s.snapshot_id=$1`,
+           SELECT s.project_id,$2,nf.id,s.qualified_name,s.symbol_kind,s.signature,s.start_line,s.end_line
+           FROM project_knowledge.code_symbols s JOIN project_knowledge.code_files old ON old.id=s.file_id
+           JOIN project_knowledge.code_files nf ON nf.snapshot_id=$2 AND nf.repo_relative_path=old.repo_relative_path
+           WHERE s.snapshot_id=$1`,
           [previous.id, snapshot.id],
         );
         await client.query(
           `INSERT INTO project_knowledge.search_chunks(project_id,item_id,snapshot_id,parent_ref,kind,domain,service,worktree_id,title,content,content_hash,token_count,embedding,embedding_model_id,embed_hash,metadata)
-          SELECT project_id,item_id,$2,parent_ref,kind,domain,service,worktree_id,title,content,content_hash,token_count,embedding,embedding_model_id,embed_hash,metadata
-          FROM project_knowledge.search_chunks WHERE snapshot_id=$1`,
-          [previous.id, snapshot.id],
+           SELECT c.project_id,c.item_id,$2,c.parent_ref,c.kind,c.domain,c.service,c.worktree_id,c.title,c.content,c.content_hash,c.token_count,
+             CASE WHEN m.model_name=$4 AND m.model_revision=$5 AND m.dimensions=$6 THEN c.embedding END,
+             CASE WHEN m.model_name=$4 AND m.model_revision=$5 AND m.dimensions=$6 THEN c.embedding_model_id END,
+             c.embed_hash,c.metadata
+           FROM project_knowledge.search_chunks c
+           LEFT JOIN project_knowledge.embedding_models m ON m.id=c.embedding_model_id
+           WHERE c.snapshot_id=$1 AND NOT (c.metadata->>'path'=ANY($3::text[]))`,
+          [
+            previous.id,
+            snapshot.id,
+            changedPaths,
+            this.embeddingModel.name,
+            this.embeddingModel.revision,
+            this.embeddingModel.dimensions,
+          ],
         );
-      } else {
-        changes = (await listIndexableFiles(fingerprint.root)).map((file) => ({
-          status: 'A',
-          path: file,
-        }));
       }
-      const changedPaths = [
-        ...new Set(
-          changes.flatMap((change) => [
-            change.path,
-            ...(change.previousPath ? [change.previousPath] : []),
-          ]),
-        ),
-      ];
-      if (changedPaths.length) {
-        await clearChangedSnapshotRows(client, snapshot.id, changedPaths);
-      }
-      let indexedFiles = 0;
-      for (const change of changes) {
-        const absolute = path.resolve(fingerprint.root, change.path);
-        if (
-          change.status === 'D' ||
-          !absolute.startsWith(`${fingerprint.root}${path.sep}`)
-        )
-          continue;
-        const content = await readFile(absolute, 'utf8').catch(() => undefined);
-        if (content === undefined || content.includes('\u0000')) continue;
-        const fileHash = sourceHash(content);
-        const file = (
-          await client.query<{ id: string }>(
-            `
-          INSERT INTO project_knowledge.code_files(project_id,snapshot_id,repo_relative_path,language,source_hash)
-          VALUES($1,$2,$3,$4,$5) RETURNING id`,
-            [
-              projectRow.project_id,
-              snapshot.id,
-              change.path.replace(/\\/gu, '/'),
-              languageFor(change.path),
-              fileHash,
-            ],
-          )
-        ).rows[0]!;
-        const units = parseSourceUnits(change.path, content);
-        const effectiveUnits = units.length
-          ? units
-          : splitDocumentationUnit({
-              title: change.path,
-              headingLine: change.path,
-              content,
-              startLine: 1,
-              endLine: content.split('\n').length,
-            });
-        const isPrimaryWorktree =
-          path.resolve(fingerprint.root).toLowerCase() ===
-          primaryRepositoryPath.toLowerCase();
-        for (const unit of effectiveUnits) {
-          if (unit.kind === 'symbol' && unit.symbol)
-            await client.query(
-              `INSERT INTO project_knowledge.code_symbols
-            (project_id,snapshot_id,file_id,qualified_name,symbol_kind,start_line,end_line) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-              [
-                projectRow.project_id,
-                snapshot.id,
-                file.id,
-                unit.symbol,
-                unit.kind,
-                unit.startLine,
-                unit.endLine,
-              ],
-            );
-          const metadata = {
-            path: change.path.replace(/\\/gu, '/'),
-            ...(unit.symbol ? { symbol: unit.symbol } : {}),
-            ...(unit.endpoint ? { endpoint: unit.endpoint } : {}),
-            ...(unit.schemaTable ? { schema_table: unit.schemaTable } : {}),
-            ...(unit.heading ? { heading: unit.heading } : {}),
-            lines: { start: unit.startLine, end: unit.endLine },
-            citation: `${change.path}:${unit.startLine}`,
-          };
-          const embeddingPolicy = sourceChunkEmbeddingPolicy(
-            unit.kind,
-            unit.content,
-            isPrimaryWorktree,
+      if (stagedFiles.length) {
+        await client.query(
+          `INSERT INTO project_knowledge.code_files(id,project_id,snapshot_id,repo_relative_path,language,source_hash)
+           SELECT f.id,$1,$2,f.path,f.language,f.hash
+           FROM jsonb_to_recordset($3::jsonb) AS f(id uuid,path text,language text,hash text)`,
+          [
+            projectRow.project_id,
+            snapshot.id,
+            JSON.stringify(
+              stagedFiles.map(({ id, path, language, hash }) => ({
+                id,
+                path,
+                language,
+                hash,
+              })),
+            ),
+          ],
+        );
+        if (symbols.length)
+          await client.query(
+            `INSERT INTO project_knowledge.code_symbols(project_id,snapshot_id,file_id,qualified_name,symbol_kind,start_line,end_line)
+           SELECT $1,$2,s.file_id,s.qualified_name,s.symbol_kind,s.start_line,s.end_line
+           FROM jsonb_to_recordset($3::jsonb) AS s(file_id uuid,qualified_name text,symbol_kind text,start_line int,end_line int)`,
+            [projectRow.project_id, snapshot.id, JSON.stringify(symbols)],
           );
-          const inserted = await client.query<{ id: string }>(
-            `INSERT INTO project_knowledge.search_chunks
-            (project_id,snapshot_id,worktree_id,kind,title,content,content_hash,token_count,embed_hash,metadata)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-            [
-              projectRow.project_id,
-              snapshot.id,
-              worktree.id,
-              unit.kind,
-              unit.title,
-              unit.content,
-              unit.contentHash,
-              countSerializedTokens(unit.content),
-              embeddingPolicy.embedHash,
-              metadata,
-            ],
-          );
-          if (embeddingPolicy.priority !== null)
-            await client.query(
-              `INSERT INTO project_knowledge.outbox_jobs
-                (project_id,job_type,job_key,required_capability,parent_job_id,payload,priority)
-              VALUES($1,'embed_chunk',$2,'embedding',$3,$4,$5) ON CONFLICT DO NOTHING`,
-              [
-                projectRow.project_id,
-                `embed:${inserted.rows[0]!.id}`,
-                options.parentJobId ?? null,
-                { chunkId: inserted.rows[0]!.id },
-                embeddingPolicy.priority,
-              ],
-            );
-        }
-        indexedFiles++;
+        await client.query(
+          `INSERT INTO project_knowledge.search_chunks(id,project_id,snapshot_id,worktree_id,kind,title,content,content_hash,token_count,embed_hash,metadata)
+           SELECT c.id,$1,$2,$3,c.kind,c.title,c.content,c.content_hash,c.token_count,c.embed_hash,c.metadata
+           FROM jsonb_to_recordset($4::jsonb) AS c(id uuid,kind text,title text,content text,content_hash text,token_count int,embed_hash text,metadata jsonb)`,
+          [
+            projectRow.project_id,
+            snapshot.id,
+            worktree.id,
+            JSON.stringify(chunks),
+          ],
+        );
       }
+      // Reuse only the configured model. The cache and immutable previous chunks can
+      // satisfy changed locators without creating work just to discover a cache hit.
+      await client.query(
+        `UPDATE project_knowledge.search_chunks target SET embedding=source.embedding,embedding_model_id=source.embedding_model_id
+         FROM project_knowledge.search_chunks source
+         JOIN project_knowledge.embedding_models model ON model.id=source.embedding_model_id
+         WHERE target.snapshot_id=$1 AND target.embedding IS NULL AND target.embed_hash=source.embed_hash
+           AND source.embedding IS NOT NULL AND source.project_id=target.project_id
+           AND model.model_name=$2 AND model.model_revision=$3 AND model.dimensions=$4`,
+        [
+          snapshot.id,
+          this.embeddingModel.name,
+          this.embeddingModel.revision,
+          this.embeddingModel.dimensions,
+        ],
+      );
+      await client.query(
+        `WITH model AS (
+           INSERT INTO project_knowledge.embedding_models(project_id,model_name,model_revision,dimensions,active)
+           SELECT $1,$3,$4,$5,true WHERE EXISTS (
+             SELECT 1 FROM project_knowledge.search_chunks c
+             JOIN project_knowledge.embedding_cache cache ON cache.text_hash=c.embed_hash AND cache.model_key=$6
+             WHERE c.snapshot_id=$2 AND c.embedding IS NULL)
+           ON CONFLICT(project_id,model_name,model_revision) DO UPDATE SET active=true
+             WHERE project_knowledge.embedding_models.dimensions=EXCLUDED.dimensions
+           RETURNING id
+         )
+         UPDATE project_knowledge.search_chunks target SET embedding=cache.embedding,embedding_model_id=model.id
+         FROM project_knowledge.embedding_cache cache,model
+         WHERE target.snapshot_id=$2 AND target.embedding IS NULL AND target.embed_hash=cache.text_hash AND cache.model_key=$6`,
+        [
+          projectRow.project_id,
+          snapshot.id,
+          this.embeddingModel.name,
+          this.embeddingModel.revision,
+          this.embeddingModel.dimensions,
+          embeddingModelKey(this.embeddingModel),
+        ],
+      );
+      await client.query(
+        `INSERT INTO project_knowledge.outbox_jobs(project_id,job_type,job_key,required_capability,parent_job_id,payload,priority)
+         SELECT project_id,'embed_chunk','embed:'||id::text,'embedding',$2,jsonb_build_object('chunkId',id),
+           CASE kind WHEN 'documentation' THEN 50 WHEN 'file_summary' THEN 30 ELSE 40 END-$3
+         FROM project_knowledge.search_chunks
+         WHERE snapshot_id=$1 AND embedding IS NULL AND embed_hash IS NOT NULL
+           AND kind=ANY($4::text[])
+         ON CONFLICT DO NOTHING`,
+        [
+          snapshot.id,
+          options.parentJobId ?? null,
+          isPrimaryWorktree ? 0 : 20,
+          [...EMBEDDABLE_CHUNK_KINDS],
+        ],
+      );
+      const indexedFiles = stagedFiles.length;
       if (previous) {
         await client.query(
           `INSERT INTO project_knowledge.documentation_freshness
@@ -529,6 +695,7 @@ export class KnowledgeWorker {
              AND rollup.repo_relative_path=ANY($4::text[])`,
           [projectRow.project_id, worktree.id, snapshot.id, changedPaths],
         );
+      await assertFingerprint();
       await client.query(
         `UPDATE project_knowledge.source_snapshots SET state='superseded'
         WHERE project_id=$1 AND worktree_id=$2 AND state='active'`,
@@ -690,7 +857,9 @@ export class KnowledgeWorker {
       throw new Error(
         'Project must be reconciled before legacy delivery normalization',
       );
-    const store = new PgKnowledgeStore(this.pool as never);
+    const store = new PgKnowledgeStore(this.pool as never, {
+      embeddingCacheModel: this.embeddingModel,
+    });
     let revision = Number(projectRow.db_revision);
     let changed = 0;
     for (const note of notes) {
@@ -774,7 +943,10 @@ export class KnowledgeWorker {
     return changed;
   }
 
-  async syncCanonicalDocuments(project: WorkerProject): Promise<number> {
+  async syncCanonicalDocuments(
+    project: WorkerProject,
+    options: { snapshotId?: string } = {},
+  ): Promise<number> {
     const documents = [
       {
         path: 'docs/architecture.md',
@@ -805,20 +977,27 @@ export class KnowledgeWorker {
       await this.pool.query<{ db_revision: number; snapshot_id: string }>(
         `SELECT p.db_revision,s.id AS snapshot_id
          FROM project_knowledge.projects p
+         JOIN project_knowledge.worktrees w ON w.project_id=p.project_id
          JOIN LATERAL (
-           SELECT id FROM project_knowledge.source_snapshots
-           WHERE project_id=p.project_id AND state='active'
-           ORDER BY activated_at DESC LIMIT 1
-         ) s ON true WHERE p.project_key=$1`,
-        [project.projectKey],
+           SELECT s.id FROM project_knowledge.source_snapshots s
+           WHERE s.project_id=p.project_id AND s.worktree_id=w.id AND s.state='active'
+             AND ($3::uuid IS NULL OR s.id=$3)
+           ORDER BY s.activated_at DESC LIMIT 1
+         ) s ON true WHERE p.project_key=$1 AND w.path=$2`,
+        [
+          project.projectKey,
+          project.logicalRepositoryPath ?? path.resolve(project.repositoryPath),
+          options.snapshotId ?? null,
+        ],
       )
     ).rows[0];
     if (!projectRow)
       throw new Error(
-        'Project must be reconciled before canonical documents are synchronized',
+        'An active snapshot for this worktree is required before canonical documents are synchronized',
       );
-    const store = new PgKnowledgeStore(this.pool as never);
-    let revision = Number(projectRow.db_revision);
+    const store = new PgKnowledgeStore(this.pool as never, {
+      embeddingCacheModel: this.embeddingModel,
+    });
     let changed = 0;
     for (const document of documents) {
       const body = await readFile(
@@ -826,6 +1005,16 @@ export class KnowledgeWorker {
         'utf8',
       ).catch(() => undefined);
       if (!body) continue;
+      const indexedFile = (
+        await this.pool.query<{ source_hash: string }>(
+          'SELECT source_hash FROM project_knowledge.code_files WHERE snapshot_id=$1 AND repo_relative_path=$2',
+          [projectRow.snapshot_id, document.path],
+        )
+      ).rows[0];
+      if (indexedFile?.source_hash !== sourceHash(body))
+        throw new Error(
+          `Canonical document content does not match the bound snapshot: ${document.path}`,
+        );
       const existing = (
         await this.pool.query<{
           id: string;
@@ -864,14 +1053,21 @@ export class KnowledgeWorker {
         )
       ).rows[0];
       if (!evidenceChunk) continue;
-      const result = await store.writeProjectKnowledge({
+      await store.writeProjectKnowledge({
         projectKey: project.projectKey,
         actor: 'knowledge-worker',
-        expectedProjectRevision: revision,
+        idempotencyKey: `canonical:${projectRow.snapshot_id}:${document.stableKey}:${expected}:${existing?.current_version ?? 0}`,
+        message: `Synchronize ${document.title}`,
+        reason: 'evidence_refresh',
         changes: [
           {
             operation: existing ? 'patch' : 'create',
-            ...(existing ? { expectedVersion: existing.current_version } : {}),
+            ...(existing
+              ? {
+                  expectedVersion: existing.current_version,
+                  expectedHash: existing.canonical_hash,
+                }
+              : {}),
             evidence: [
               {
                 snapshotId: projectRow.snapshot_id,
@@ -893,7 +1089,6 @@ export class KnowledgeWorker {
           },
         ],
       });
-      revision = result.dbRevision;
       changed++;
     }
     return changed;
@@ -1172,7 +1367,9 @@ export class KnowledgeWorker {
     ).rows[0];
     if (!projectRow)
       throw new Error('Project must be reconciled before Inbox processing');
-    const store = new PgKnowledgeStore(this.pool as never);
+    const store = new PgKnowledgeStore(this.pool as never, {
+      embeddingCacheModel: this.embeddingModel,
+    });
     let revision = Number(projectRow.db_revision);
     let imported = 0;
     let needsClarification = 0;

@@ -1,6 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { MetricsSink } from '@mcp-dashboard/metrics';
-import { loadMetricsModule, type MetricsModule } from './metrics-loader.js';
+import {
+  loadMetricsModule,
+  type MetricsModule,
+  type MetricsSink,
+} from './metrics-loader.js';
 import type { VaultRegistry } from './config/registry.js';
 import { DailyNoteService } from './services/daily-note-service.js';
 import { FilesystemService } from './services/filesystem-service.js';

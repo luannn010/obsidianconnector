@@ -9,6 +9,7 @@ interface JobRow {
   content: string;
   content_hash: string;
   embed_hash: string | null;
+  attempts?: number;
 }
 
 function harness(options: {
@@ -20,9 +21,13 @@ function harness(options: {
   embedMany?: (texts: string[]) => Promise<number[][]>;
   orphanRepairIntervalMs?: number;
   now?: () => number;
+  owned?: boolean;
+  failFirstApply?: boolean;
+  targetProjects?: string[];
 }) {
   const queries: Array<{ sql: string; values?: unknown[] }> = [];
   const jobs = options.jobs ?? [];
+  let failApply = options.failFirstApply ?? false;
   const client = {
     query: async (sql: string, values?: unknown[]) => {
       queries.push({ sql, values });
@@ -30,19 +35,41 @@ function harness(options: {
         return { rows: [{ ...(options.sweep ?? {}) }] };
       if (sql.includes('AS reenqueued'))
         return { rows: [{ reenqueued: options.reenqueued ?? 0 }] };
+      if (
+        sql.includes(
+          'INSERT INTO project_knowledge.worker_maintenance_schedule',
+        )
+      )
+        return { rows: [{ task_key: 'embedding-orphan-repair' }] };
       if (sql.includes('RETURNING jobs.id')) return { rows: jobs };
+      if (sql.startsWith('SELECT j.id FROM project_knowledge.outbox_jobs j'))
+        return { rows: options.owned === false ? [] : jobs };
       if (sql.includes('SELECT text_hash,embedding'))
         return { rows: options.cached ?? [] };
+      if (
+        sql.includes(
+          'INSERT INTO project_knowledge.embedding_compute_leases',
+        ) ||
+        sql.includes('INSERT INTO project_knowledge.embedding_cache')
+      )
+        return {
+          rows: (values?.[1] as string[]).map((text_hash) => ({ text_hash })),
+        };
       if (sql.includes('SELECT DISTINCT project_id'))
         return {
-          rows: [...new Set(jobs.map(({ project_id }) => project_id))].map(
-            (project_id) => ({ project_id }),
-          ),
+          rows: (
+            options.targetProjects ?? [
+              ...new Set(jobs.map(({ project_id }) => project_id)),
+            ]
+          ).map((project_id) => ({ project_id })),
         };
       if (sql.includes('INSERT INTO project_knowledge.embedding_models'))
         return { rows: [{ id: `model-${String(values?.[0])}` }] };
       if (sql.includes('SELECT count(*) AS applied'))
-        return { rows: [{ applied: options.applied ?? jobs.length }] };
+        if (failApply) {
+          failApply = false;
+          throw new Error('publication rolled back');
+        } else return { rows: [{ applied: options.applied ?? jobs.length }] };
       return { rows: [] };
     },
     release: vi.fn(),
@@ -52,7 +79,7 @@ function harness(options: {
     embedMany: vi.fn(options.embedMany ?? (async () => [[0.1, 0.2, 0.3]])),
   };
   const processor = new EmbeddingQueueProcessor(
-    { connect: async () => client } as unknown as Pool,
+    { connect: async () => client, query: client.query } as unknown as Pool,
     embedder,
     { name: 'test-model', revision: 'r1', dimensions: 3 },
     {
@@ -64,6 +91,107 @@ function harness(options: {
 }
 
 describe('EmbeddingQueueProcessor', () => {
+  const leasedJob: JobRow = {
+    id: 'job-1',
+    chunk_id: 'chunk-1',
+    project_id: 'project-1',
+    content: 'content',
+    content_hash: 'content-hash',
+    embed_hash: 'hash-a',
+    attempts: 2,
+  };
+
+  it('recreates model identity after a publication transaction rolls back', async () => {
+    const { processor, queries } = harness({
+      jobs: [leasedJob],
+      failFirstApply: true,
+    });
+    await expect(processor.processBatch(1)).resolves.toMatchObject({
+      failed: 1,
+    });
+    await expect(processor.processBatch(1)).resolves.toMatchObject({
+      applied: 1,
+      failed: 0,
+    });
+    expect(
+      queries.filter(({ sql }) =>
+        sql.startsWith('INSERT INTO project_knowledge.embedding_models'),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('creates cold project model rows in deterministic order across batches', async () => {
+    for (const targetProjects of [
+      ['project-b', 'project-a'],
+      ['project-a', 'project-b'],
+    ]) {
+      const { processor, queries } = harness({
+        jobs: [leasedJob],
+        targetProjects,
+      });
+      await processor.processBatch(1);
+      expect(
+        queries
+          .filter(({ sql }) =>
+            sql.startsWith('INSERT INTO project_knowledge.embedding_models'),
+          )
+          .map(({ values }) => values?.[0]),
+      ).toEqual(['project-a', 'project-b']);
+    }
+  });
+
+  it('completes its locked job when another owner already published a compatible vector', async () => {
+    const { processor, queries } = harness({ jobs: [leasedJob], applied: 0 });
+    await expect(processor.processBatch(1)).resolves.toMatchObject({
+      applied: 0,
+      failed: 0,
+    });
+    const apply = queries.find(({ sql }) => sql.includes('WITH vector_data'))!;
+    expect(apply.sql).toContain('completed_chunks AS');
+    expect(apply.sql).toContain('FROM completed_chunks chunk');
+    expect(apply.sql).toContain('c.embedding_model_id=model.model_id');
+  });
+
+  it('does not publish vectors after its job ownership is lost', async () => {
+    const { processor, queries } = harness({ jobs: [leasedJob], owned: false });
+    await expect(processor.processBatch(1)).resolves.toMatchObject({
+      applied: 0,
+    });
+    expect(queries.some(({ sql }) => sql.includes('WITH vector_data'))).toBe(
+      false,
+    );
+  });
+
+  it('fences failure by owner, claim generation and unexpired processing lease', async () => {
+    const { processor, queries } = harness({
+      jobs: [leasedJob],
+      embedMany: async () => {
+        throw new Error('offline');
+      },
+    });
+    await processor.processBatch(1);
+    const failure = queries.find(({ sql }) => sql.includes('power(2'))!;
+    expect(failure.sql).toContain("state='processing'");
+    expect(failure.sql).toContain('lease_owner=$3');
+    expect(failure.sql).toContain('attempts=claim.attempt');
+    expect(failure.sql).toContain('lease_expires_at>now()');
+    expect(failure.values?.[3]).toEqual([2]);
+  });
+
+  it('locks valid claims before publication and protects chunks changed during inference', async () => {
+    const { processor, queries } = harness({ jobs: [leasedJob] });
+    await processor.processBatch(1);
+    const ownership = queries.find(({ sql }) =>
+      sql.startsWith('SELECT j.id FROM project_knowledge.outbox_jobs j'),
+    )!;
+    expect(ownership?.sql).toContain('FOR UPDATE OF j');
+    expect(ownership?.sql).toContain('j.attempts=claim.attempt');
+    const apply = queries.find(({ sql }) => sql.includes('WITH vector_data'))!;
+    expect(apply.sql).toContain('c.content_hash=claimed.content_hash');
+    expect(apply.sql).toContain('WHERE c.id=target.id AND c.embedding IS NULL');
+    expect(apply.sql).toContain('j.id=ANY($9::uuid[])');
+  });
+
   it('uses a cache hit without calling the embedder', async () => {
     const { processor, embedder } = harness({
       jobs: [
@@ -118,6 +246,11 @@ describe('EmbeddingQueueProcessor', () => {
       applied: 2,
     });
     expect(embedder.embedMany).toHaveBeenCalledWith(['same']);
+    expect(
+      queries.some(({ sql }) =>
+        sql.includes('INSERT INTO project_knowledge.embedding_compute_leases'),
+      ),
+    ).toBe(true);
     expect(
       queries.filter(({ sql }) =>
         sql.includes('INSERT INTO project_knowledge.embedding_cache'),
@@ -187,7 +320,7 @@ describe('EmbeddingQueueProcessor', () => {
     expect(sweep.sql).toContain(
       "resolution=jsonb_build_object('reason','inactive_chunk')",
     );
-    const claim = queries.find(({ sql }) => sql.includes('SKIP LOCKED'))!;
+    const claim = queries.find(({ sql }) => sql.includes('WITH fair'))!;
     expect(claim.sql).toContain('c.active');
     expect(claim.sql).toContain(
       'ORDER BY fair.project_rank, fair.priority DESC, fair.created_at',
@@ -218,9 +351,7 @@ describe('EmbeddingQueueProcessor', () => {
     const repairs = queries.filter(({ sql }) => sql.includes('AS reenqueued'));
     expect(repairs).toHaveLength(1);
     expect(repairs[0]!.sql).toContain("c.kind<>'symbol'");
-    expect(repairs[0]!.sql).toContain(
-      "existing.job_key='embed:'||c.id::text",
-    );
+    expect(repairs[0]!.sql).toContain("existing.job_key='embed:'||c.id::text");
     expect(repairs[0]!.values).toContainEqual([
       'documentation',
       'api_endpoint',

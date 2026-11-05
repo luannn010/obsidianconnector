@@ -69,6 +69,8 @@ interface SnapshotRow extends QueryResultRow {
   snapshot_id: string;
   head_commit: string;
   snapshot_head: string;
+  dirty_hash: string | null;
+  snapshot_dirty_hash: string | null;
   state: string;
   parser_revision: string | null;
 }
@@ -388,6 +390,17 @@ function decodeCursor(cursor?: string): number {
 }
 
 export class PgKnowledgeStore implements KnowledgeStore {
+  private readonly recallCache = new Map<
+    string,
+    {
+      validator: string;
+      expiresAt: number;
+      result: ContextResults & { budget: TokenBudget };
+      embedder: EmbeddingProvider | undefined;
+      reranker: Reranker | undefined;
+    }
+  >();
+
   constructor(
     private readonly pool: PgPoolLike,
     private readonly options: PgKnowledgeStoreOptions = {},
@@ -400,12 +413,13 @@ export class PgKnowledgeStore implements KnowledgeStore {
       const result = await this.pool.query<SnapshotRow>(
         `
         SELECT p.project_id, p.db_revision, w.id AS worktree_id, s.id AS snapshot_id,
-               w.head_commit, s.head_commit AS snapshot_head, s.state
+               w.head_commit, s.head_commit AS snapshot_head,
+               w.dirty_hash, s.dirty_hash AS snapshot_dirty_hash, s.state
         FROM project_knowledge.projects p
         JOIN project_knowledge.repositories r ON r.project_id = p.project_id
         JOIN project_knowledge.worktrees w ON w.repository_id = r.id AND w.project_id = p.project_id
         JOIN LATERAL (
-          SELECT id, head_commit, state FROM project_knowledge.source_snapshots
+          SELECT id, head_commit, dirty_hash, state FROM project_knowledge.source_snapshots
           WHERE project_id = p.project_id AND worktree_id = w.id AND state = 'active'
           ORDER BY activated_at DESC NULLS LAST LIMIT 1
         ) s ON true
@@ -491,7 +505,8 @@ export class PgKnowledgeStore implements KnowledgeStore {
         gitRevision: row.snapshot_head,
         dbRevision: Number(row.db_revision),
         freshness:
-          row.head_commit === row.snapshot_head
+          row.head_commit === row.snapshot_head &&
+          (row.dirty_hash ?? null) === (row.snapshot_dirty_hash ?? null)
             ? ('current' as const)
             : ('stale' as const),
         ...(task
@@ -605,6 +620,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
             ORDER BY checked_at DESC LIMIT 1
           ) df ON true
           WHERE c.project_id = $1 AND c.active AND ($2::uuid IS NULL OR c.snapshot_id IS NULL OR c.snapshot_id = $2)
+            AND ($2::uuid IS NOT NULL OR c.snapshot_id IS NULL OR s.state='active')
             AND ($5::uuid IS NULL OR c.worktree_id IS NULL OR c.worktree_id=$5)
             AND ($6::text[] IS NULL OR c.kind=ANY($6))
             AND ($7::text[] IS NULL OR c.domain=ANY($7))
@@ -695,6 +711,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
           LEFT JOIN LATERAL (
             SELECT state FROM project_knowledge.documentation_freshness
             WHERE item_id=c.item_id AND ($2::uuid IS NULL OR snapshot_id=$2)
+              AND ($10::uuid IS NULL OR worktree_id=$10)
               AND knowledge_version_id=(SELECT id FROM project_knowledge.knowledge_versions WHERE item_id=i.id AND version=i.current_version)
             ORDER BY checked_at DESC LIMIT 1
           ) df ON true
@@ -727,6 +744,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
           LEFT JOIN LATERAL (
             SELECT state FROM project_knowledge.documentation_freshness
             WHERE item_id=c.item_id AND ($2::uuid IS NULL OR snapshot_id=$2)
+              AND ($10::uuid IS NULL OR worktree_id=$10)
               AND knowledge_version_id=(SELECT id FROM project_knowledge.knowledge_versions WHERE item_id=i.id AND version=i.current_version)
             ORDER BY checked_at DESC LIMIT 1
           ) df ON true
@@ -844,6 +862,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
         false,
       );
     let snapshotId: string | undefined;
+    let snapshotFreshness: Freshness | undefined;
     let worktreeId = input.worktreeId;
     if (input.worktreePath) {
       const snapshot = await this.getProjectSnapshot({
@@ -853,18 +872,27 @@ export class PgKnowledgeStore implements KnowledgeStore {
         maxTokens: 100,
       });
       snapshotId = snapshot.snapshotId;
+      snapshotFreshness = snapshot.freshness;
       worktreeId = snapshot.worktreeId;
     }
-    const recalled = await this.searchProjectContext({
-      projectKey: input.projectKey,
-      query,
-      mode: input.intent === 'verify' ? 'exact' : 'auto',
-      limit: input.intent === 'catch_up' ? 30 : 12,
-      maxTokens: Math.min(4000, input.maxTokens * 3),
-      ...(snapshotId ? { snapshotId } : {}),
-      ...(worktreeId ? { worktreeId } : {}),
-      ...(input.filters ? { filters: input.filters } : {}),
-    });
+    const recalled = await this.searchRecallContext(
+      {
+        projectKey: input.projectKey,
+        query,
+        mode: input.intent === 'verify' ? 'exact' : 'auto',
+        limit: input.intent === 'catch_up' ? 30 : 12,
+        maxTokens: Math.min(4000, input.maxTokens * 3),
+        ...(snapshotId ? { snapshotId } : {}),
+        ...(worktreeId ? { worktreeId } : {}),
+        ...(input.filters ? { filters: input.filters } : {}),
+      },
+      input.intent,
+      input.maxTokens,
+    );
+    // Explicit snapshot filtering establishes content identity, not whether the
+    // bound worktree still matches that snapshot. Preserve the binding check
+    // even when the underlying search result was served from the recall cache.
+    if (snapshotFreshness === 'stale') recalled.freshness = 'stale';
     const catchUpPriority = new Map([
       ['handoff', 0],
       ['gotcha', 1],
@@ -890,12 +918,14 @@ export class PgKnowledgeStore implements KnowledgeStore {
       snapshotId: snapshotId ?? null,
       gitRevision: recalled.gitRevision,
       dbRevision: recalled.dbRevision,
+      freshness: recalled.freshness,
       warnings: recalled.warnings ?? [],
       results: rankedResults.map((hit) => ({
         ref: hit.ref,
         itemId: hit.itemId ?? null,
         itemVersion: hit.itemVersion ?? null,
         contentHash: hit.contentHash,
+        documentationFreshness: hit.documentationFreshness ?? null,
         claimedBy: hit.claimedBy ?? null,
         claimExpiresAt: hit.claimExpiresAt ?? null,
       })),
@@ -936,6 +966,86 @@ export class PgKnowledgeStore implements KnowledgeStore {
       results: packed.results,
       budget: packed.budget,
     };
+  }
+
+  private async recallValidator(
+    projectKey: string,
+  ): Promise<string | undefined> {
+    try {
+      const row = (
+        await this.pool.query<{ db_revision: number; retrieval_epoch: string }>(
+          `SELECT p.db_revision,COALESCE(SUM(e.revision),0)::text AS retrieval_epoch
+         FROM project_knowledge.projects p
+         LEFT JOIN project_knowledge.retrieval_epochs e ON e.project_id=p.project_id
+         WHERE p.project_key=$1 GROUP BY p.project_id,p.db_revision`,
+          [projectKey],
+        )
+      ).rows[0];
+      if (!row || row.retrieval_epoch === undefined) return undefined;
+      return canonicalHash({
+        revision: String(row.db_revision),
+        epoch: row.retrieval_epoch,
+      });
+    } catch {
+      // Migration rollout or validation failure disables caching, not recall.
+      return undefined;
+    }
+  }
+
+  private async searchRecallContext(
+    input: SearchProjectContextInput,
+    intent: RecallProjectKnowledgeInput['intent'],
+    maxTokens: number,
+  ): Promise<ContextResults & { budget: TokenBudget }> {
+    const key = canonicalHash({
+      input,
+      intent,
+      maxTokens,
+      model: this.options.embeddingCacheModel ?? null,
+      rerankerEnabled: this.options.rerankerEnabled ?? false,
+    });
+    const before = await this.recallValidator(input.projectKey);
+    const cached = this.recallCache.get(key);
+    if (
+      before &&
+      cached &&
+      cached.validator === before &&
+      cached.expiresAt > Date.now() &&
+      cached.embedder === this.options.embedder &&
+      cached.reranker === this.options.reranker
+    ) {
+      this.recallCache.delete(key);
+      this.recallCache.set(key, cached);
+      return structuredClone(cached.result);
+    }
+    this.recallCache.delete(key);
+    const result = await this.searchProjectContext(input);
+    if (
+      before &&
+      !result.warnings?.length &&
+      before === (await this.recallValidator(input.projectKey))
+    ) {
+      // Claims can expire without any database mutation. Do not cache their
+      // active appearance beyond that wall-clock boundary.
+      const expiresAt = Math.min(
+        Date.now() + 30_000,
+        ...result.results.flatMap((hit) =>
+          hit.claimExpiresAt ? [Date.parse(hit.claimExpiresAt)] : [],
+        ),
+      );
+      if (expiresAt > Date.now()) {
+        this.recallCache.set(key, {
+          validator: before,
+          expiresAt,
+          result: structuredClone(result),
+          embedder: this.options.embedder,
+          reranker: this.options.reranker,
+        });
+        if (this.recallCache.size > 64)
+          this.recallCache.delete(this.recallCache.keys().next().value!);
+      }
+    }
+    return result;
   }
 
   async writeProjectKnowledge(
@@ -988,7 +1098,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
       await client.query('BEGIN');
       const project = await client.query<ProjectRow>(
         `
-        SELECT project_id, db_revision FROM project_knowledge.projects WHERE project_key=$1 FOR UPDATE
+        SELECT project_id, db_revision FROM project_knowledge.projects WHERE project_key=$1 FOR NO KEY UPDATE
       `,
         [input.projectKey],
       );
@@ -1083,12 +1193,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
       const changes = [] as KnowledgeWriteResult['changes'];
       for (const change of normalizedChanges) {
         changes.push(
-          await this.applyChange(
-            client,
-            projectRow.project_id,
-            input,
-            change,
-          ),
+          await this.applyChange(client, projectRow.project_id, input, change),
         );
       }
       const changed = changes.filter(
@@ -1561,16 +1666,43 @@ export class PgKnowledgeStore implements KnowledgeStore {
         ],
       );
     }
+    const chunkContent = `${title}\n\n${bodyMarkdown}`;
+    const embedHash = embeddingHash(chunkContent);
+    const model = this.options.embeddingCacheModel;
+    const reusable =
+      existing && model
+        ? (
+            await client.query<{
+              embedding: string;
+              embedding_model_id: string;
+            }>(
+              `SELECT c.embedding,c.embedding_model_id
+           FROM project_knowledge.search_chunks c
+           JOIN project_knowledge.embedding_models m ON m.id=c.embedding_model_id AND m.project_id=c.project_id
+           WHERE c.project_id=$1 AND c.item_id=$2 AND c.active AND c.embed_hash=$3
+             AND c.embedding IS NOT NULL AND m.model_name=$4 AND m.model_revision=$5
+             AND m.dimensions=$6 AND vector_dims(c.embedding)=$6
+           LIMIT 1`,
+              [
+                projectId,
+                itemId,
+                embedHash,
+                model.name,
+                model.revision,
+                model.dimensions,
+              ],
+            )
+          ).rows[0]
+        : undefined;
     await client.query(
       'UPDATE project_knowledge.search_chunks SET active=false WHERE project_id=$1 AND item_id=$2 AND active',
       [projectId, itemId],
     );
     const chunkId = randomUUID();
-    const chunkContent = `${title}\n\n${bodyMarkdown}`;
     await client.query(
       `INSERT INTO project_knowledge.search_chunks
-      (id,project_id,item_id,kind,domain,service,title,content,content_hash,token_count,embed_hash,metadata)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      (id,project_id,item_id,kind,domain,service,title,content,content_hash,token_count,embed_hash,metadata,embedding,embedding_model_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::vector,$14)`,
       [
         chunkId,
         projectId,
@@ -1582,28 +1714,38 @@ export class PgKnowledgeStore implements KnowledgeStore {
         chunkContent,
         hash,
         countSerializedTokens(chunkContent),
-        embeddingHash(chunkContent),
+        embedHash,
         {
           citation: `knowledge:${itemId}:v${version}`,
           itemVersion: version,
           ...(record.kind === 'work_item' ? activeClaim(properties) : {}),
         },
+        reusable?.embedding ?? null,
+        reusable?.embedding_model_id ?? null,
       ],
     );
-    await client.query(
-      `INSERT INTO project_knowledge.outbox_jobs
+    if (reusable) {
+      await client.query(
+        `INSERT INTO project_knowledge.outbox_jobs
+          (project_id,job_type,job_key,required_capability,priority,payload)
+         VALUES($1,'publish_item',$2,'publish',0,$3) ON CONFLICT DO NOTHING`,
+        [projectId, `publish:${itemId}:${version}`, { itemId, version }],
+      );
+    } else
+      await client.query(
+        `INSERT INTO project_knowledge.outbox_jobs
         (project_id,job_type,job_key,required_capability,priority,payload)
       VALUES($1,'embed_chunk',$2,'embedding',100,$3),
             ($1,'publish_item',$4,'publish',0,$5)
       ON CONFLICT DO NOTHING`,
-      [
-        projectId,
-        `embed:${chunkId}`,
-        { chunkId },
-        `publish:${itemId}:${version}`,
-        { itemId, version },
-      ],
-    );
+        [
+          projectId,
+          `embed:${chunkId}`,
+          { chunkId },
+          `publish:${itemId}:${version}`,
+          { itemId, version },
+        ],
+      );
     if (change.operation === 'supersede' && change.supersedesId) {
       await client.query(
         'UPDATE project_knowledge.knowledge_items SET superseded_by=$3,updated_at=now() WHERE project_id=$1 AND id=$2',
@@ -1618,7 +1760,7 @@ export class PgKnowledgeStore implements KnowledgeStore {
       outcome: existing ? 'updated' : 'created',
       changedFields,
       lexicalState: 'current',
-      embeddingState: 'pending',
+      embeddingState: reusable ? 'unchanged' : 'pending',
       projectionState: 'deferred',
     };
   }

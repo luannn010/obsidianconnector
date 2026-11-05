@@ -8,6 +8,10 @@ services:
       - ${PROJECT_KNOWLEDGE_QUEUE_ENV_FILE}
     environment:
       NODE_OPTIONS: --max-old-space-size=384
+      # Match Git's Windows checkout normalization for this Windows bind mount.
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: 'true'
       PROJECT_KNOWLEDGE_HOST_KIND: windows
       PROJECT_KNOWLEDGE_WORKER_CAPABILITIES: ${PROJECT_KNOWLEDGE_WINDOWS_CAPABILITIES:-source-sync,publish}
       PROJECT_KNOWLEDGE_WORKER_RELEASE: ${PROJECT_KNOWLEDGE_WORKER_RELEASE}

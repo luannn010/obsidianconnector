@@ -6,6 +6,8 @@ import {
   embeddingText,
 } from '../knowledge/embed-text.js';
 import type { EmbeddingProvider } from '../knowledge/pg-store.js';
+import { PgEmbeddingCoordinator } from '../knowledge/embedding-coordinator.js';
+import { claimMaintenanceWindow } from './maintenance-window.js';
 
 export interface EmbeddingModelIdentity {
   name: string;
@@ -32,6 +34,7 @@ interface ClaimedJob {
   content: string;
   content_hash: string;
   embed_hash: string | null;
+  attempts: number;
 }
 
 interface PreparedJob extends ClaimedJob {
@@ -39,30 +42,9 @@ interface PreparedJob extends ClaimedJob {
   embeddingContent: string;
 }
 
-interface CachedEmbeddingRow {
-  text_hash: string;
-  embedding: unknown;
-}
-
 function numeric(value: unknown): number {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function parseVector(value: unknown): number[] | undefined {
-  if (Array.isArray(value)) {
-    const vector = value.map(Number);
-    return vector.every(Number.isFinite) ? vector : undefined;
-  }
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return undefined;
-  const vector = trimmed
-    .slice(1, -1)
-    .split(',')
-    .filter((entry) => entry.length > 0)
-    .map(Number);
-  return vector.every(Number.isFinite) ? vector : undefined;
 }
 
 export class EmbeddingQueueProcessor {
@@ -113,7 +95,7 @@ export class EmbeddingQueueProcessor {
            WHERE j.job_type='embed_chunk'
              AND (j.state IN ('pending','failed') OR
                   (j.state='processing' AND (j.lease_expires_at IS NULL OR j.lease_expires_at<now())))
-           ORDER BY j.priority DESC, j.created_at LIMIT $5
+           ORDER BY j.priority DESC, j.created_at LIMIT $5 FOR UPDATE OF j SKIP LOCKED
          ), retired_missing AS (
            UPDATE project_knowledge.outbox_jobs j
            SET state='superseded',finished_at=now(),locked_at=NULL,last_error=NULL,
@@ -168,14 +150,16 @@ export class EmbeddingQueueProcessor {
            SET embedding=candidate.embedding,embedding_model_id=model.id
            FROM cache_candidates candidate
            JOIN model_rows model ON model.project_id=candidate.project_id
-           WHERE target.id=candidate.id RETURNING target.id,candidate.text_hash
+           WHERE target.id=candidate.id AND target.embedding IS NULL AND target.active
+             AND target.embed_hash= candidate.text_hash RETURNING target.id,candidate.text_hash
          ), cached_jobs AS (
            UPDATE project_knowledge.outbox_jobs j
            SET state='done',finished_at=now(),locked_at=NULL,last_error=NULL,
                lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),
                resolution=jsonb_build_object('reason','cache_hit')
            FROM cached_chunks chunk
-           WHERE j.job_type='embed_chunk' AND j.state IN ('pending','failed','processing')
+           WHERE j.id IN (SELECT id FROM live)
+             AND j.job_type='embed_chunk' AND j.state IN ('pending','failed','processing')
              AND j.payload->>'chunkId'=chunk.id::text RETURNING j.id
          ), touched_cache AS (
            UPDATE project_knowledge.embedding_cache cache SET last_used_at=now()
@@ -279,7 +263,7 @@ export class EmbeddingQueueProcessor {
          WHERE jobs.id IN (SELECT id FROM candidates)
            AND chunks.id=(jobs.payload->>'chunkId')::uuid
          RETURNING jobs.id,chunks.id AS chunk_id,chunks.project_id,chunks.content,
-                   chunks.content_hash,chunks.embed_hash`,
+                   chunks.content_hash,chunks.embed_hash,jobs.attempts`,
         [limit, this.workerId],
       )
     ).rows;
@@ -309,11 +293,6 @@ export class EmbeddingQueueProcessor {
     return id;
   }
 
-  private validateVector(vector: number[]): void {
-    if (vector.length !== this.model.dimensions)
-      throw new Error(`Embedding dimension mismatch: ${vector.length}`);
-  }
-
   private async targetProjectIds(
     client: PoolClient,
     keys: string[],
@@ -333,7 +312,7 @@ export class EmbeddingQueueProcessor {
            FROM project_knowledge.search_chunks c
            LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
            WHERE c.id=ANY($2::uuid[])
-             AND c.active AND c.embedding IS NULL
+             AND c.active
              AND (c.snapshot_id IS NULL OR s.state='active')
          ) targets`,
         [keys, claimedChunkIds],
@@ -355,19 +334,20 @@ export class EmbeddingQueueProcessor {
       keys,
       jobs.map(({ chunk_id }) => chunk_id),
     );
-    const modelIds = await Promise.all(
-      projectIds.map((projectId) => this.modelId(client, projectId)),
-    );
+    projectIds.sort();
+    const modelIds: string[] = [];
+    for (const projectId of projectIds)
+      modelIds.push(await this.modelId(client, projectId));
     const entries = keys.map((key) => vectors.get(key)!);
     const result = await client.query<{ applied: number }>(
       `WITH vector_data(text_hash,embedding,reason) AS MATERIALIZED (
          SELECT * FROM unnest($1::text[],$2::text[],$3::text[])
        ), model_data(project_id,model_id) AS MATERIALIZED (
          SELECT * FROM unnest($4::uuid[],$5::uuid[])
-       ), claimed_data(chunk_id,text_hash) AS MATERIALIZED (
-         SELECT * FROM unnest($6::uuid[],$7::text[])
+       ), claimed_data(chunk_id,text_hash,content_hash) AS MATERIALIZED (
+         SELECT * FROM unnest($6::uuid[],$7::text[],$10::text[])
        ), targets AS MATERIALIZED (
-         SELECT c.id,c.project_id,data.text_hash,data.embedding,data.reason,model.model_id
+         SELECT c.id,c.project_id,data.text_hash,data.embedding,data.reason,model.model_id,c.content_hash
          FROM project_knowledge.search_chunks c
          JOIN vector_data data ON c.embed_hash=data.text_hash
          JOIN model_data model ON model.project_id=c.project_id
@@ -375,27 +355,41 @@ export class EmbeddingQueueProcessor {
          WHERE c.active AND c.embedding IS NULL
            AND (c.snapshot_id IS NULL OR s.state='active')
          UNION
-         SELECT c.id,c.project_id,data.text_hash,data.embedding,data.reason,model.model_id
+         SELECT c.id,c.project_id,data.text_hash,data.embedding,data.reason,model.model_id,c.content_hash
          FROM claimed_data claimed
          JOIN project_knowledge.search_chunks c ON c.id=claimed.chunk_id
          JOIN vector_data data ON data.text_hash=claimed.text_hash
          JOIN model_data model ON model.project_id=c.project_id
          LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
-         WHERE c.active AND c.embedding IS NULL
+         WHERE c.active AND c.embedding IS NULL AND c.content_hash=claimed.content_hash
            AND (c.snapshot_id IS NULL OR s.state='active')
        ), updated_chunks AS (
          UPDATE project_knowledge.search_chunks c
          SET embedding=target.embedding::vector,embedding_model_id=target.model_id,
              embed_hash=COALESCE(c.embed_hash,target.text_hash)
-         FROM targets target WHERE c.id=target.id
+         FROM targets target WHERE c.id=target.id AND c.embedding IS NULL AND c.active
+           AND c.content_hash=target.content_hash
+           AND (c.embed_hash IS NULL OR c.embed_hash=target.text_hash)
          RETURNING c.id,target.text_hash,target.reason
+       ), completed_chunks AS (
+         SELECT id,text_hash,reason FROM updated_chunks
+         UNION
+         SELECT c.id,claimed.text_hash,'cache_hit'::text AS reason
+         FROM claimed_data claimed
+         JOIN project_knowledge.search_chunks c ON c.id=claimed.chunk_id
+         JOIN model_data model ON model.project_id=c.project_id
+         LEFT JOIN project_knowledge.source_snapshots s ON s.id=c.snapshot_id
+         WHERE c.active AND c.embedding IS NOT NULL
+           AND c.embed_hash=claimed.text_hash AND c.content_hash=claimed.content_hash
+           AND c.embedding_model_id=model.model_id
+           AND (c.snapshot_id IS NULL OR s.state='active')
        ), completed_jobs AS (
          UPDATE project_knowledge.outbox_jobs j
          SET state='done',finished_at=now(),locked_at=NULL,last_error=NULL,
              lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),
              resolution=jsonb_build_object('reason',chunk.reason,'embedHash',chunk.text_hash)
-         FROM updated_chunks chunk
-         WHERE j.job_type='embed_chunk' AND j.state IN ('pending','failed','processing')
+         FROM completed_chunks chunk
+         WHERE j.id=ANY($9::uuid[]) AND j.job_type='embed_chunk' AND j.state='processing'
            AND j.payload->>'chunkId'=chunk.id::text RETURNING j.id
        ), touched_cache AS (
          UPDATE project_knowledge.embedding_cache cache SET last_used_at=now()
@@ -412,6 +406,8 @@ export class EmbeddingQueueProcessor {
         jobs.map(({ chunk_id }) => chunk_id),
         jobs.map(({ cacheKey }) => cacheKey),
         this.modelKey,
+        jobs.map(({ id }) => id),
+        jobs.map(({ content_hash }) => content_hash),
       ],
     );
     return numeric(result.rows[0]?.applied);
@@ -432,13 +428,20 @@ export class EmbeddingQueueProcessor {
            locked_at=NULL,lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=now(),last_error=$2,
            resolution=CASE WHEN attempts>=max_attempts THEN jsonb_build_object('reason','max_attempts') ELSE resolution END,
            available_at=now()+make_interval(secs => LEAST(300,30*power(2,GREATEST(attempts-1,0)))::int)
-       WHERE id=ANY($1::uuid[])`,
-      [jobs.map(({ id }) => id), message],
+       FROM unnest($1::uuid[],$4::int[]) AS claim(id,attempt)
+       WHERE outbox_jobs.id=claim.id AND attempts=claim.attempt
+         AND lease_owner=$3 AND state='processing' AND lease_expires_at>now()`,
+      [
+        jobs.map(({ id }) => id),
+        message,
+        this.workerId,
+        jobs.map(({ attempts }) => attempts),
+      ],
     );
   }
 
   async processBatch(limit = 50): Promise<EmbeddingBatchStats> {
-    const client = await this.pool.connect();
+    let client: PoolClient | undefined = await this.pool.connect();
     try {
       await client.query('BEGIN');
       const swept = await this.sweep(client, limit);
@@ -448,11 +451,20 @@ export class EmbeddingQueueProcessor {
         this.lastOrphanRepairAt === undefined ||
         now - this.lastOrphanRepairAt >= this.orphanRepairIntervalMs
       ) {
-        reenqueued = await this.repairOrphans(client);
+        if (
+          await claimMaintenanceWindow(
+            client,
+            'embedding-orphan-repair',
+            this.orphanRepairIntervalMs,
+          )
+        )
+          reenqueued = await this.repairOrphans(client);
         this.lastOrphanRepairAt = now;
       }
       const claimed = await this.claim(client, limit);
       await client.query('COMMIT');
+      client.release();
+      client = undefined;
       const jobs: PreparedJob[] = claimed.map((job) => ({
         ...job,
         cacheKey: job.embed_hash?.trim() || embeddingHash(job.content),
@@ -475,67 +487,85 @@ export class EmbeddingQueueProcessor {
           .query(
             `UPDATE project_knowledge.outbox_jobs SET heartbeat_at=now(),
                lease_expires_at=now()+interval '2 minutes'
-             WHERE id=ANY($1::uuid[]) AND lease_owner=$2 AND state='processing'`,
-            [claimed.map(({ id }) => id), this.workerId],
+             FROM unnest($1::uuid[],$3::int[]) AS claim(id,attempt)
+             WHERE outbox_jobs.id=claim.id AND attempts=claim.attempt
+               AND lease_owner=$2 AND state='processing' AND lease_expires_at>now()`,
+            [
+              claimed.map(({ id }) => id),
+              this.workerId,
+              claimed.map(({ attempts }) => attempts),
+            ],
           )
           .catch(() => undefined);
       }, 15_000);
       heartbeat.unref();
       try {
-        const cachedRows = await client.query<CachedEmbeddingRow>(
-          `SELECT text_hash,embedding FROM project_knowledge.embedding_cache
-           WHERE model_key=$1 AND text_hash::text=ANY($2::text[])`,
-          [this.modelKey, representatives.map(({ cacheKey }) => cacheKey)],
+        const byHash = new Map(
+          representatives.map((job) => [job.cacheKey, job.embeddingContent]),
+        );
+        const coordinated = await new PgEmbeddingCoordinator(
+          this.pool,
+          this.model.dimensions,
+        ).getOrComputeMany(
+          this.modelKey,
+          [...byHash.keys()],
+          async (hashes) => {
+            const texts = hashes.map((hash) => byHash.get(hash)!);
+            return this.embedder.embedMany
+              ? this.embedder.embedMany(texts)
+              : Promise.all(texts.map((text) => this.embedder.embed(text)));
+          },
         );
         const vectors = new Map<
           string,
           { vector: number[]; reason: 'embedded' | 'cache_hit' }
         >();
-        for (const row of cachedRows.rows) {
-          const vector = parseVector(row.embedding);
-          if (!vector || vector.length !== this.model.dimensions) continue;
-          vectors.set(row.text_hash.trim(), { vector, reason: 'cache_hit' });
+        let embedded = 0;
+        for (const [hash, { vector, computed }] of coordinated) {
+          vectors.set(hash, {
+            vector,
+            reason: computed ? 'embedded' : 'cache_hit',
+          });
+          if (computed) embedded++;
         }
-        const misses = representatives.filter(
-          ({ cacheKey }) => !vectors.has(cacheKey),
-        );
-        const embeddedVectors = misses.length
-          ? this.embedder.embedMany
-            ? await this.embedder.embedMany(
-                misses.map(({ embeddingContent }) => embeddingContent),
-              )
-            : await Promise.all(
-                misses.map(({ embeddingContent }) =>
-                  this.embedder.embed(embeddingContent),
-                ),
-              )
-          : [];
-        if (embeddedVectors.length !== misses.length)
-          throw new Error(
-            `Embedding batch returned ${embeddedVectors.length} vectors for ${misses.length} chunks`,
-          );
-        embeddedVectors.forEach((vector, index) => {
-          this.validateVector(vector);
-          vectors.set(misses[index]!.cacheKey, { vector, reason: 'embedded' });
-        });
-        if (misses.length > 0) {
-          await client.query(
-            `INSERT INTO project_knowledge.embedding_cache(model_key,text_hash,embedding)
-             SELECT $1,value.text_hash::char(64),value.embedding::vector
-             FROM unnest($2::text[],$3::text[]) AS value(text_hash,embedding)
-             ON CONFLICT(model_key,text_hash) DO NOTHING`,
+        // Hold claim row locks only while publishing. Reclaimers cannot change
+        // ownership between this check and the atomic chunk/job updates.
+        client = await this.pool.connect();
+        await client.query('BEGIN');
+        let applied = 0;
+        try {
+          const owned = await client.query<{ id: string }>(
+            `SELECT j.id FROM project_knowledge.outbox_jobs j
+             JOIN unnest($1::uuid[],$3::int[]) AS claim(id,attempt) ON j.id=claim.id
+             WHERE j.lease_owner=$2 AND j.attempts=claim.attempt
+               AND j.state='processing' AND j.lease_expires_at>now()
+             ORDER BY j.id FOR UPDATE OF j`,
             [
-              this.modelKey,
-              misses.map(({ cacheKey }) => cacheKey),
-              embeddedVectors.map((vector) => `[${vector.join(',')}]`),
+              jobs.map(({ id }) => id),
+              this.workerId,
+              jobs.map(({ attempts }) => attempts),
             ],
           );
+          const ownedIds = new Set(owned.rows.map(({ id }) => id));
+          const ownedJobs = jobs.filter(({ id }) => ownedIds.has(id));
+          const ownedKeys = new Set(ownedJobs.map(({ cacheKey }) => cacheKey));
+          if (ownedJobs.length > 0)
+            applied = await this.applyVectors(
+              client,
+              ownedJobs,
+              new Map([...vectors].filter(([key]) => ownedKeys.has(key))),
+            );
+          await client.query('COMMIT');
+        } catch (error) {
+          // Model rows first created in this transaction disappear on rollback.
+          this.modelIds.clear();
+          await client.query('ROLLBACK');
+          throw error;
         }
-        const applied = await this.applyVectors(client, jobs, vectors);
-        const batchCacheHits = representatives.length - misses.length;
+        const batchCacheHits = representatives.length - embedded;
         return {
           claimed: claimed.length,
-          embedded: misses.length,
+          embedded,
           applied,
           reused: swept.reused + batchCacheHits,
           cacheHits: swept.cacheHits + batchCacheHits,
@@ -545,6 +575,7 @@ export class EmbeddingQueueProcessor {
           failed: 0,
         };
       } catch (error) {
+        client ??= await this.pool.connect();
         await this.fail(client, claimed, error);
         return {
           claimed: claimed.length,
@@ -558,10 +589,10 @@ export class EmbeddingQueueProcessor {
         clearInterval(heartbeat);
       }
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      await client?.query('ROLLBACK').catch(() => undefined);
       throw error;
     } finally {
-      client.release();
+      client?.release();
     }
   }
 }

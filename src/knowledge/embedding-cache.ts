@@ -1,41 +1,29 @@
 import {
-  embeddingHash,
   embeddingModelKey,
   queryEmbeddingText,
   type EmbeddingModelKeyInput,
 } from './embed-text.js';
+import { sourceHash } from './hash.js';
+import { PgEmbeddingCoordinator } from './embedding-coordinator.js';
 import type { EmbeddingProvider, PgPoolLike } from './pg-store.js';
 
 const MEMORY_CACHE_LIMIT = 500;
 
-function parseVector(value: unknown): number[] | undefined {
-  if (Array.isArray(value)) {
-    const vector = value.map(Number);
-    return vector.every(Number.isFinite) ? vector : undefined;
-  }
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return undefined;
-  const vector = trimmed
-    .slice(1, -1)
-    .split(',')
-    .filter((entry) => entry.length > 0)
-    .map(Number);
-  return vector.every(Number.isFinite) ? vector : undefined;
-}
-
 export class CachingEmbeddingProvider implements EmbeddingProvider {
   private readonly memory = new Map<string, number[]>();
+  private readonly inFlight = new Map<string, Promise<number[]>>();
   private readonly modelKey: string;
-  private readonly dimensions: number;
+  private readonly coordinator: PgEmbeddingCoordinator | undefined;
 
   constructor(
     private readonly inner: EmbeddingProvider,
-    private readonly pool: PgPoolLike | undefined,
+    pool: PgPoolLike | undefined,
     model: EmbeddingModelKeyInput,
   ) {
     this.modelKey = embeddingModelKey(model);
-    this.dimensions = model.dimensions;
+    this.coordinator = pool
+      ? new PgEmbeddingCoordinator(pool, model.dimensions)
+      : undefined;
   }
 
   private remember(hash: string, vector: number[]): void {
@@ -49,48 +37,30 @@ export class CachingEmbeddingProvider implements EmbeddingProvider {
 
   async embed(query: string): Promise<number[]> {
     const text = queryEmbeddingText(query);
-    const hash = embeddingHash(text);
+    // Query inputs are not document snippets: hash the complete model input
+    // and isolate it from the shared document-embedding cache namespace.
+    const hash = sourceHash(`query\0${text}`);
     const remembered = this.memory.get(hash);
     if (remembered) {
       this.remember(hash, remembered);
       return remembered;
     }
+    const pending = this.inFlight.get(hash);
+    if (pending) return pending;
+    const computation = this.compute(text, hash).finally(() => {
+      this.inFlight.delete(hash);
+    });
+    this.inFlight.set(hash, computation);
+    return computation;
+  }
 
-    if (this.pool) {
-      try {
-        const cached = await this.pool.query<{ embedding: unknown }>(
-          `SELECT embedding FROM project_knowledge.embedding_cache
-           WHERE model_key=$1 AND text_hash=$2`,
-          [this.modelKey, hash],
-        );
-        const vector = parseVector(cached.rows[0]?.embedding);
-        if (vector?.length === this.dimensions) {
-          await this.pool
-            .query(
-              `UPDATE project_knowledge.embedding_cache
-               SET last_used_at=now() WHERE model_key=$1 AND text_hash=$2`,
-              [this.modelKey, hash],
-            )
-            .catch(() => undefined);
-          this.remember(hash, vector);
-          return vector;
-        }
-      } catch {
-        // Cache availability must not make semantic search unavailable.
-      }
-    }
-
-    const vector = await this.inner.embed(text);
-    this.remember(hash, vector);
-    if (this.pool) {
-      await this.pool
-        .query(
-          `INSERT INTO project_knowledge.embedding_cache(model_key,text_hash,embedding)
-           VALUES($1,$2,$3::vector) ON CONFLICT(model_key,text_hash) DO NOTHING`,
-          [this.modelKey, hash, `[${vector.join(',')}]`],
+  private async compute(text: string, hash: string): Promise<number[]> {
+    const vector = this.coordinator
+      ? await this.coordinator.getOrCompute(this.modelKey, hash, () =>
+          this.inner.embed(text),
         )
-        .catch(() => undefined);
-    }
+      : await this.inner.embed(text);
+    this.remember(hash, vector);
     return vector;
   }
 
